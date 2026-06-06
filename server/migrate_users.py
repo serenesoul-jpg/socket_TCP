@@ -53,6 +53,8 @@ def migrate() -> None:
     skipped = 0
 
     for username, password_or_hash in users.items():
+        if username.startswith("_"):  # 跳过占位字段（_notice 等）
+            continue
         if is_hashed(password_or_hash):
             # 已是 64 位十六进制摘要，直接入库（可能来自上次迁移）
             stored = password_or_hash

@@ -158,6 +158,16 @@ class TcpFileClient:
             raise ConnectionError("尚未连接服务器")  # 提示先连接
         return self._sock  # 返回 Socket
 
+    def _invalidate_socket(self) -> None:
+        """连接异常时关闭并清空 Socket，避免后续操作继续使用坏连接。"""
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        self._logged_in = False
+
     def login(self, username: str, password: str) -> None:
         """发送登录请求并处理服务器响应（password 为 GUI 明文，发送前本地哈希）。"""
         sock = self._require_socket()  # 获取 Socket
@@ -167,9 +177,16 @@ class TcpFileClient:
         pass_b = pass_hash.encode("utf-8")  # 64 字节十六进制哈希字符串
         payload = struct.pack("!H", len(user_b)) + user_b  # 用户名长度+用户名
         payload += struct.pack("!H", len(pass_b)) + pass_b  # 哈希长度+哈希值
-        with self._lock:  # 加锁发送
-            send_frame(sock, CMD_LOGIN, payload)  # 发送 LOGIN 帧
-            cmd, body = parse_header(sock)  # 等待 LOGIN_RESP
+        try:
+            with self._lock:  # 加锁发送
+                send_frame(sock, CMD_LOGIN, payload)  # 发送 LOGIN 帧
+                cmd, body = parse_header(sock)  # 等待 LOGIN_RESP
+        except (ConnectionResetError, ConnectionError, BrokenPipeError, TimeoutError, OSError) as exc:
+            with self._lock:
+                self._invalidate_socket()
+            raise ConnectionError(
+                "服务器无响应或已断开，请确认 server.py 已启动（127.0.0.1:8082）后重试"
+            ) from exc
 
         if cmd != CMD_LOGIN_RESP:  # 响应类型不符
             raise ValueError("登录响应格式错误")  # 抛出异常

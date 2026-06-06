@@ -1,60 +1,58 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""TCP 文件传输客户端 GUI：CustomTkinter 现代化界面，网络 I/O 运行于子线程。"""
+"""TCP 文件传输 GUI：CustomTkinter 界面，网络 I/O 运行于子线程。"""
 
 import os
 import threading
-import tkinter as tk
 from tkinter import filedialog, messagebox
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
 from tcp_client import TcpFileClient
 
-# 与 Web 控制台 business-light / business-dark 对齐的配色
 _PALETTE = {
     "light": {
-        "bg": "#f1f5f9",
+        "bg": "#eef2f7",
         "surface": "#ffffff",
-        "surface2": "#f8fafc",
+        "panel": "#f8fafc",
         "border": "#e2e8f0",
         "text": "#0f172a",
-        "muted": "#64748b",
+        "muted": "#94a3b8",
         "primary": "#4f46e5",
         "primary_hover": "#4338ca",
         "primary_soft": "#eef2ff",
-        "success": "#059669",
+        "success": "#10b981",
         "success_soft": "#ecfdf5",
-        "warn": "#d97706",
+        "warn": "#f59e0b",
         "warn_soft": "#fffbeb",
-        "danger": "#dc2626",
+        "danger": "#ef4444",
         "danger_soft": "#fef2f2",
-        "row_hover": "#f8fafc",
+        "track": "#e2e8f0",
     },
     "dark": {
         "bg": "#0f172a",
         "surface": "#1e293b",
-        "surface2": "#334155",
+        "panel": "#273449",
         "border": "#334155",
         "text": "#f1f5f9",
         "muted": "#94a3b8",
         "primary": "#818cf8",
         "primary_hover": "#a5b4fc",
-        "primary_soft": "#312e81",
+        "primary_soft": "#3730a3",
         "success": "#34d399",
         "success_soft": "#064e3b",
         "warn": "#fbbf24",
         "warn_soft": "#78350f",
         "danger": "#f87171",
         "danger_soft": "#7f1d1d",
-        "row_hover": "#334155",
+        "track": "#334155",
     },
 }
 
 
 class FileTransferApp(ctk.CTk):
-    """主窗口：简约商务风布局，网络 I/O 在子线程执行。"""
+    """主窗口：简约商务风，网络 I/O 在子线程执行。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -65,13 +63,14 @@ class FileTransferApp(ctk.CTk):
         self._selected_remote: str = ""
         self._selected_remote_idx: Optional[int] = None
         self._file_row_frames: List[ctk.CTkFrame] = []
+        self._busy = False
 
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
 
-        self.title("TCP 文件传输客户端")
-        self.geometry("1040x780")
-        self.minsize(920, 680)
+        self.title("TCP 文件传输")
+        self.geometry("1020x680")
+        self.minsize(900, 580)
 
         self.client = TcpFileClient(
             on_log=self._append_log,
@@ -85,402 +84,383 @@ class FileTransferApp(ctk.CTk):
         self._build_ui()
         self._apply_theme()
 
-    # ── 主题与样式 ──────────────────────────────────────────────
-
     def _palette(self) -> Dict[str, str]:
-        return _PALETTE[self._appearance]
+        key = self._appearance
+        if key == "system":
+            key = "dark" if ctk.get_appearance_mode() == "Dark" else "light"
+        return _PALETTE[key]
 
     def _font_title(self) -> ctk.CTkFont:
         return ctk.CTkFont(family="Microsoft YaHei UI", size=16, weight="bold")
 
-    def _font_section(self) -> ctk.CTkFont:
-        return ctk.CTkFont(family="Microsoft YaHei UI", size=13, weight="bold")
+    def _font_caption(self) -> ctk.CTkFont:
+        return ctk.CTkFont(family="Microsoft YaHei UI", size=11)
 
     def _font_body(self) -> ctk.CTkFont:
         return ctk.CTkFont(family="Microsoft YaHei UI", size=12)
 
-    def _font_mono(self) -> ctk.CTkFont:
-        return ctk.CTkFont(family="Consolas", size=11)
+    def _font_log(self) -> ctk.CTkFont:
+        # 日志以中文为主，用雅黑比等宽英文字体更易读
+        return ctk.CTkFont(family="Microsoft YaHei UI", size=12)
 
-    def _is_dark(self) -> bool:
-        if self._appearance == "dark":
-            return True
-        if self._appearance == "system":
-            return ctk.get_appearance_mode() == "Dark"
-        return False
-
-    def _apply_theme(self) -> None:
-        p = self._palette()
-        self.configure(fg_color=p["bg"])
-        for frame in (
-            self._header,
-            self._conn_card,
-            self._login_card,
-            self._file_card,
-            self._progress_card,
-            self._log_card,
-        ):
-            frame.configure(fg_color=p["surface"], border_color=p["border"])
-        self._brand_icon.configure(fg_color=p["primary"])
-        self._subtitle.configure(text_color=p["muted"])
-        self._local_drop.configure(
-            fg_color=p["surface2"],
-            border_color=p["border"],
-        )
-        self._refresh_file_row_styles()
-        self._update_status_badges()
+    def _fmt_size(self, size: int) -> str:
+        if size < 1024:
+            return f"{size} B"
+        kb = size / 1024
+        if kb < 1024:
+            return f"{kb:.1f} KB"
+        return f"{kb / 1024:.2f} MB"
 
     def _run_on_ui(self, func) -> None:
         self.after(0, func)
 
-    def _card(self, parent, row: int, *, pady: Tuple[int, int] = (0, 10)) -> ctk.CTkFrame:
+    def _panel(self, parent, **kw) -> ctk.CTkFrame:
         p = self._palette()
-        card = ctk.CTkFrame(
-            parent,
-            corner_radius=14,
+        defaults = dict(
+            corner_radius=10,
+            fg_color=p["panel"],
+            border_width=1,
+            border_color=p["border"],
+        )
+        defaults.update(kw)
+        return ctk.CTkFrame(parent, **defaults)
+
+    def _field_label(self, parent, text: str) -> ctk.CTkLabel:
+        return ctk.CTkLabel(
+            parent, text=text, font=self._font_caption(),
+            text_color=self._palette()["muted"], width=44, anchor="e",
+        )
+
+    def _entry(self, parent, **kw) -> ctk.CTkEntry:
+        p = self._palette()
+        defaults = dict(
+            height=34, corner_radius=8, font=self._font_body(),
+            border_width=1, border_color=p["border"],
             fg_color=p["surface"],
-            border_width=1,
-            border_color=p["border"],
         )
-        card.grid(row=row, column=0, padx=20, pady=pady, sticky="nsew")
-        card.grid_columnconfigure(0, weight=1)
-        return card
+        defaults.update(kw)
+        return ctk.CTkEntry(parent, **defaults)
 
-    def _section_title(self, parent, row: int, text: str, subtitle: str = "") -> None:
-        p = self._palette()
-        wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        wrap.grid(row=row, column=0, padx=16, pady=(14, 8), sticky="ew")
-        ctk.CTkLabel(wrap, text=text, font=self._font_section(), text_color=p["text"]).pack(anchor="w")
-        if subtitle:
-            ctk.CTkLabel(
-                wrap, text=subtitle, font=self._font_body(), text_color=p["muted"]
-            ).pack(anchor="w", pady=(2, 0))
-
-    def _primary_btn(self, parent, text: str, command, width: int = 100) -> ctk.CTkButton:
+    def _btn_primary(self, parent, text: str, cmd, width: int = 76) -> ctk.CTkButton:
         p = self._palette()
         return ctk.CTkButton(
-            parent,
-            text=text,
-            command=command,
-            width=width,
-            height=34,
-            corner_radius=8,
-            font=self._font_body(),
-            fg_color=p["primary"],
-            hover_color=p["primary_hover"],
+            parent, text=text, command=cmd, width=width, height=34,
+            corner_radius=8, font=self._font_body(),
+            fg_color=p["primary"], hover_color=p["primary_hover"],
         )
 
-    def _ghost_btn(self, parent, text: str, command, width: int = 100) -> ctk.CTkButton:
+    def _btn_secondary(self, parent, text: str, cmd, width: int = 76) -> ctk.CTkButton:
         p = self._palette()
         return ctk.CTkButton(
-            parent,
-            text=text,
-            command=command,
-            width=width,
-            height=34,
-            corner_radius=8,
-            font=self._font_body(),
-            fg_color=p["surface2"],
-            hover_color=p["border"],
-            text_color=p["text"],
-            border_width=1,
-            border_color=p["border"],
+            parent, text=text, command=cmd, width=width, height=34,
+            corner_radius=8, font=self._font_body(),
+            fg_color="transparent", hover_color=p["border"],
+            text_color=p["text"], border_width=1, border_color=p["border"],
         )
 
-    def _danger_btn(self, parent, text: str, command, width: int = 100) -> ctk.CTkButton:
+    def _btn_danger_outline(self, parent, text: str, cmd, width: int = 76) -> ctk.CTkButton:
         p = self._palette()
         return ctk.CTkButton(
-            parent,
-            text=text,
-            command=command,
-            width=width,
-            height=34,
-            corner_radius=8,
-            font=self._font_body(),
-            fg_color=p["danger"],
-            hover_color="#b91c1c",
+            parent, text=text, command=cmd, width=width, height=34,
+            corner_radius=8, font=self._font_body(),
+            fg_color="transparent", hover_color=p["danger_soft"],
+            text_color=p["danger"], border_width=1, border_color=p["danger"],
         )
 
-    # ── 界面构建 ──────────────────────────────────────────────
+    def _badge(self, parent, text: str) -> ctk.CTkLabel:
+        p = self._palette()
+        return ctk.CTkLabel(
+            parent, text=text, font=self._font_caption(),
+            text_color=p["muted"], fg_color=p["panel"],
+            corner_radius=12, height=26, padx=10,
+        )
+
+    # ── 构建界面 ──────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=3)
         self.grid_rowconfigure(5, weight=2)
 
         self._build_header()
-        self._build_conn_card()
-        self._build_login_card()
-        self._build_file_card()
-        self._build_progress_card()
-        self._build_log_card()
+        self._build_session_bar()
+        self._build_file_area()
+        self._build_progress_strip()
+        self._build_log_area()
 
-        self._append_log("客户端已启动。请连接本机服务器 127.0.0.1:8082 并登录。")
+        self._append_log("已启动 · 连接 127.0.0.1:8082 后登录")
 
     def _build_header(self) -> None:
         p = _PALETTE["light"]
-        self._header = ctk.CTkFrame(
-            self,
-            corner_radius=0,
-            fg_color=p["surface"],
-            border_width=0,
-            height=64,
-        )
+        self._header = ctk.CTkFrame(self, fg_color=p["surface"], corner_radius=0, height=56)
         self._header.grid(row=0, column=0, sticky="ew")
         self._header.grid_columnconfigure(1, weight=1)
+        self._header.grid_propagate(False)
 
-        brand = ctk.CTkFrame(self._header, fg_color="transparent")
-        brand.grid(row=0, column=0, padx=20, pady=12, sticky="w")
+        left = ctk.CTkFrame(self._header, fg_color="transparent")
+        left.grid(row=0, column=0, padx=20, sticky="w")
 
         self._brand_icon = ctk.CTkLabel(
-            brand,
-            text="FT",
-            width=40,
-            height=40,
-            corner_radius=10,
-            fg_color=p["primary"],
-            text_color="#ffffff",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            left, text="FT", width=38, height=38, corner_radius=10,
+            fg_color=p["primary"], text_color="#fff",
+            font=ctk.CTkFont(size=13, weight="bold"),
         )
-        self._brand_icon.pack(side="left")
+        self._brand_icon.grid(row=0, column=0, rowspan=2, padx=(0, 12))
 
-        title_wrap = ctk.CTkFrame(brand, fg_color="transparent")
-        title_wrap.pack(side="left", padx=(12, 0))
-        ctk.CTkLabel(
-            title_wrap,
-            text="TCP 文件传输客户端",
-            font=self._font_title(),
-            text_color=p["text"],
-        ).pack(anchor="w")
-        self._subtitle = ctk.CTkLabel(
-            title_wrap,
-            text="FTCP 协议 · 本机实验复现",
-            font=self._font_body(),
-            text_color=p["muted"],
+        self._title_lbl = ctk.CTkLabel(
+            left, text="TCP 文件传输", font=self._font_title(), text_color=p["text"],
         )
-        self._subtitle.pack(anchor="w")
-
-        actions = ctk.CTkFrame(self._header, fg_color="transparent")
-        actions.grid(row=0, column=2, padx=20, pady=12, sticky="e")
-
-        self._lbl_conn_status = ctk.CTkLabel(
-            actions,
-            text="● 未连接",
-            font=self._font_body(),
-            text_color=p["muted"],
+        self._title_lbl.grid(row=0, column=1, sticky="sw")
+        self._port_hint = ctk.CTkLabel(
+            left, text="Socket · FTCP · 8082", font=self._font_caption(), text_color=p["muted"],
         )
-        self._lbl_conn_status.pack(side="left", padx=(0, 16))
+        self._port_hint.grid(row=1, column=1, sticky="nw")
 
-        self._ui_styles = {
-            "简约浅色": "light",
-            "简约深色": "dark",
-            "跟随系统": "system",
-        }
-        self._style_menu = ctk.CTkOptionMenu(
-            actions,
-            values=list(self._ui_styles.keys()),
-            command=self._on_ui_style_change,
-            width=120,
-            height=32,
-            corner_radius=8,
-            font=self._font_body(),
+        right = ctk.CTkFrame(self._header, fg_color="transparent")
+        right.grid(row=0, column=2, padx=20, sticky="e")
+
+        self._lbl_conn_status = self._badge(right, "未连接")
+        self._lbl_conn_status.pack(side="left", padx=(0, 8))
+        self._lbl_auth_status = self._badge(right, "未登录")
+        self._lbl_auth_status.pack(side="left", padx=(0, 14))
+
+        self._theme_seg = ctk.CTkSegmentedButton(
+            right, values=["浅色", "深色"],
+            command=self._on_theme_seg, height=30, corner_radius=8,
+            font=self._font_caption(),
         )
-        self._style_menu.pack(side="left")
-        self._style_menu.set("简约浅色")
+        self._theme_seg.pack(side="left")
+        self._theme_seg.set("浅色")
 
-    def _build_conn_card(self) -> None:
-        self._conn_card = self._card(self, 1, pady=(12, 8))
-        self._section_title(self._conn_card, 0, "连接设置", "填写服务器地址后点击连接")
+        self._header_line = ctk.CTkFrame(self, height=1, corner_radius=0, fg_color=p["border"])
+        self._header_line.grid(row=1, column=0, sticky="ew")
 
-        row = ctk.CTkFrame(self._conn_card, fg_color="transparent")
-        row.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="ew")
-        row.grid_columnconfigure(1, weight=1)
+    def _build_session_bar(self) -> None:
+        self._session_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self._session_bar.grid(row=2, column=0, padx=20, pady=(14, 10), sticky="ew")
+        self._session_bar.grid_columnconfigure(5, weight=1)
+        self._session_bar.grid_columnconfigure(11, weight=1)
 
-        ctk.CTkLabel(row, text="服务器 IP", font=self._font_body()).grid(row=0, column=0, padx=(0, 8))
-        self.entry_host = ctk.CTkEntry(
-            row, placeholder_text="127.0.0.1", height=34, corner_radius=8, font=self._font_body()
-        )
-        self.entry_host.grid(row=0, column=1, padx=4, sticky="ew")
+        # 连接区
+        self._field_label(self._session_bar, "IP").grid(row=0, column=0, padx=(0, 6))
+        self.entry_host = self._entry(self._session_bar)
+        self.entry_host.grid(row=0, column=1, sticky="ew")
         self.entry_host.insert(0, "127.0.0.1")
 
-        ctk.CTkLabel(row, text="端口", font=self._font_body()).grid(row=0, column=2, padx=(12, 8))
-        self.entry_port = ctk.CTkEntry(row, width=80, height=34, corner_radius=8, font=self._font_body())
-        self.entry_port.grid(row=0, column=3, padx=4)
+        self._field_label(self._session_bar, "端口").grid(row=0, column=2, padx=(12, 6))
+        self.entry_port = self._entry(self._session_bar, width=68)
+        self.entry_port.grid(row=0, column=3)
         self.entry_port.insert(0, "8082")
 
-        self.btn_connect = self._primary_btn(row, "连接", self._on_connect, 88)
+        self.btn_connect = self._btn_primary(self._session_bar, "连接", self._on_connect)
         self.btn_connect.grid(row=0, column=4, padx=(12, 4))
-        self.btn_disconnect = self._danger_btn(row, "断开", self._on_disconnect, 88)
-        self.btn_disconnect.grid(row=0, column=5, padx=4)
+        self.btn_disconnect = self._btn_secondary(self._session_bar, "断开", self._on_disconnect)
+        self.btn_disconnect.grid(row=0, column=5, padx=4, sticky="w")
 
-    def _build_login_card(self) -> None:
-        self._login_card = self._card(self, 2, pady=8)
-        self._section_title(self._login_card, 0, "身份验证", "登录后方可上传、下载与删除文件")
-
-        row = ctk.CTkFrame(self._login_card, fg_color="transparent")
-        row.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="ew")
-        row.grid_columnconfigure(1, weight=1)
-        row.grid_columnconfigure(3, weight=1)
-
-        ctk.CTkLabel(row, text="用户名", font=self._font_body()).grid(row=0, column=0, padx=(0, 8))
-        self.entry_user = ctk.CTkEntry(
-            row, placeholder_text="admin", height=34, corner_radius=8, font=self._font_body()
+        ctk.CTkFrame(self._session_bar, width=1, height=28, fg_color=_PALETTE["light"]["border"]).grid(
+            row=0, column=6, padx=16
         )
-        self.entry_user.grid(row=0, column=1, padx=4, sticky="ew")
 
-        ctk.CTkLabel(row, text="密码", font=self._font_body()).grid(row=0, column=2, padx=(12, 8))
-        self.entry_pass = ctk.CTkEntry(
-            row, placeholder_text="admin123", show="*", height=34, corner_radius=8, font=self._font_body()
+        # 登录区
+        self._field_label(self._session_bar, "用户名").grid(row=0, column=7, padx=(0, 6))
+        self.entry_user = self._entry(self._session_bar)
+        self.entry_user.grid(row=0, column=8, sticky="ew")
+        self.entry_user.insert(0, "admin")
+
+        self._field_label(self._session_bar, "密码").grid(row=0, column=9, padx=(12, 6))
+        self.entry_pass = self._entry(self._session_bar, show="*")
+        self.entry_pass.grid(row=0, column=10, sticky="ew")
+        self.entry_pass.insert(0, "admin123")
+
+        self.btn_login = self._btn_primary(self._session_bar, "登录", self._on_login)
+        self.btn_login.grid(row=0, column=11, padx=(12, 0), sticky="e")
+
+    def _build_file_area(self) -> None:
+        self._file_outer = ctk.CTkFrame(self, fg_color="transparent")
+        self._file_outer.grid(row=3, column=0, padx=20, pady=(0, 8), sticky="nsew")
+        self._file_outer.grid_columnconfigure(0, weight=3)
+        self._file_outer.grid_columnconfigure(1, weight=2)
+        self._file_outer.grid_rowconfigure(1, weight=1)
+
+        toolbar = ctk.CTkFrame(self._file_outer, fg_color="transparent")
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self._file_title = ctk.CTkLabel(
+            toolbar, text="文件", font=self._font_body(), text_color=self._palette()["text"],
         )
-        self.entry_pass.grid(row=0, column=3, padx=4, sticky="ew")
+        self._file_title.pack(side="left")
 
-        self.btn_login = self._primary_btn(row, "登录", self._on_login, 88)
-        self.btn_login.grid(row=0, column=4, padx=(12, 8))
+        btns = ctk.CTkFrame(toolbar, fg_color="transparent")
+        btns.pack(side="right")
+        self.btn_refresh = self._btn_secondary(btns, "刷新", self._on_refresh_list, 68)
+        self.btn_refresh.pack(side="left", padx=(0, 6))
+        self.btn_upload = self._btn_primary(btns, "上传", self._on_upload, 68)
+        self.btn_upload.pack(side="left", padx=3)
+        self.btn_download = self._btn_secondary(btns, "下载", self._on_download, 68)
+        self.btn_download.pack(side="left", padx=3)
+        self.btn_delete = self._btn_danger_outline(btns, "删除", self._on_delete, 68)
+        self.btn_delete.pack(side="left", padx=3)
 
-        self.lbl_auth = ctk.CTkLabel(
-            row,
-            text="未登录",
-            font=self._font_body(),
-            text_color=_PALETTE["light"]["warn"],
-            fg_color=_PALETTE["light"]["warn_soft"],
-            corner_radius=16,
-            width=88,
-            height=30,
+        # 远端列表
+        self._remote_panel = self._panel(self._file_outer)
+        self._remote_panel.grid(row=1, column=0, padx=(0, 6), sticky="nsew")
+        self._remote_panel.grid_columnconfigure(0, weight=1)
+        self._remote_panel.grid_rowconfigure(1, weight=1)
+
+        self._remote_hdr = ctk.CTkLabel(
+            self._remote_panel, text="远端", font=self._font_caption(),
+            text_color=self._palette()["muted"], anchor="w",
         )
-        self.lbl_auth.grid(row=0, column=5, padx=4)
-
-    def _build_file_card(self) -> None:
-        self._file_card = self._card(self, 3, pady=8)
-        self._file_card.grid_rowconfigure(1, weight=1)
-        self._file_card.grid_columnconfigure(0, weight=1)
-        self._file_card.grid_columnconfigure(1, weight=1)
-
-        headers = ctk.CTkFrame(self._file_card, fg_color="transparent")
-        headers.grid(row=0, column=0, columnspan=2, padx=16, pady=(14, 6), sticky="ew")
-        headers.grid_columnconfigure(0, weight=1)
-        headers.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(headers, text="远端文件", font=self._font_section()).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(headers, text="本地文件", font=self._font_section()).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self._remote_hdr.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
 
         self._remote_scroll = ctk.CTkScrollableFrame(
-            self._file_card,
-            height=220,
-            corner_radius=10,
-            fg_color=_PALETTE["light"]["surface2"],
-            border_width=1,
-            border_color=_PALETTE["light"]["border"],
+            self._remote_panel, fg_color="transparent", corner_radius=0,
         )
-        self._remote_scroll.grid(row=1, column=0, padx=(16, 8), pady=4, sticky="nsew")
+        self._remote_scroll.grid(row=1, column=0, padx=6, pady=(0, 8), sticky="nsew")
         self._remote_scroll.grid_columnconfigure(0, weight=1)
 
+        self._remote_empty_icon = ctk.CTkLabel(
+            self._remote_scroll, text="☁", font=ctk.CTkFont(size=26),
+            text_color=self._palette()["muted"],
+        )
+        self._remote_empty_icon.grid(row=0, column=0, pady=(28, 4))
         self._remote_empty = ctk.CTkLabel(
-            self._remote_scroll,
-            text="登录后点击「刷新列表」加载文件",
-            font=self._font_body(),
-            text_color=_PALETTE["light"]["muted"],
+            self._remote_scroll, text="登录后刷新列表",
+            font=self._font_caption(), text_color=self._palette()["muted"],
         )
-        self._remote_empty.grid(row=0, column=0, pady=40)
+        self._remote_empty.grid(row=1, column=0)
 
-        local_wrap = ctk.CTkFrame(self._file_card, fg_color="transparent")
-        local_wrap.grid(row=1, column=1, padx=(8, 16), pady=4, sticky="nsew")
-        local_wrap.grid_rowconfigure(0, weight=1)
-        local_wrap.grid_columnconfigure(0, weight=1)
+        # 本地选择
+        self._local_panel = self._panel(self._file_outer)
+        self._local_panel.grid(row=1, column=1, padx=(6, 0), sticky="nsew")
+        self._local_panel.grid_columnconfigure(0, weight=1)
+        self._local_panel.grid_rowconfigure(1, weight=1)
 
-        self._local_drop = ctk.CTkFrame(
-            local_wrap,
-            corner_radius=10,
-            fg_color=_PALETTE["light"]["surface2"],
-            border_width=1,
-            border_color=_PALETTE["light"]["border"],
+        self._local_hdr = ctk.CTkLabel(
+            self._local_panel, text="本地", font=self._font_caption(),
+            text_color=self._palette()["muted"], anchor="w",
         )
-        self._local_drop.grid(row=0, column=0, sticky="nsew")
-        self._local_drop.grid_columnconfigure(0, weight=1)
+        self._local_hdr.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
 
-        ctk.CTkLabel(
-            self._local_drop,
-            text="📁",
-            font=ctk.CTkFont(size=28),
-        ).grid(row=0, column=0, pady=(28, 4))
+        self._local_inner = ctk.CTkFrame(self._local_panel, fg_color="transparent")
+        self._local_inner.grid(row=1, column=0, padx=12, pady=(4, 12), sticky="nsew")
+        self._local_inner.grid_columnconfigure(0, weight=1)
+
+        self._local_icon = ctk.CTkLabel(
+            self._local_inner, text="📄", font=ctk.CTkFont(size=30),
+            text_color=self._palette()["muted"],
+        )
+        self._local_icon.grid(row=0, column=0, pady=(20, 6))
         self.lbl_local = ctk.CTkLabel(
-            self._local_drop,
-            text="点击选择要上传的本地文件",
-            font=self._font_body(),
-            text_color=_PALETTE["light"]["muted"],
-            wraplength=320,
-            justify="center",
+            self._local_inner, text="选择要上传的文件",
+            font=self._font_body(), text_color=self._palette()["muted"],
+            wraplength=240, justify="center",
         )
-        self.lbl_local.grid(row=1, column=0, padx=16, pady=4)
-        ctk.CTkButton(
-            self._local_drop,
-            text="浏览本地文件",
-            command=self._on_browse_local,
-            height=32,
-            corner_radius=8,
-            font=self._font_body(),
-            fg_color=_PALETTE["light"]["primary"],
-            hover_color=_PALETTE["light"]["primary_hover"],
-        ).grid(row=2, column=0, pady=(8, 24))
-
-        btn_row = ctk.CTkFrame(self._file_card, fg_color="transparent")
-        btn_row.grid(row=2, column=0, columnspan=2, padx=16, pady=(8, 14), sticky="ew")
-
-        self.btn_refresh = self._ghost_btn(btn_row, "↻ 刷新列表", self._on_refresh_list, 120)
-        self.btn_refresh.pack(side="left", padx=(0, 8))
-        self.btn_upload = self._primary_btn(btn_row, "↑ 上传", self._on_upload, 100)
-        self.btn_upload.pack(side="left", padx=4)
-        self.btn_download = ctk.CTkButton(
-            btn_row,
-            text="↓ 下载",
-            command=self._on_download,
-            width=100,
-            height=34,
-            corner_radius=8,
-            font=self._font_body(),
-            fg_color="#0ea5e9",
-            hover_color="#0284c7",
+        self.lbl_local.grid(row=1, column=0)
+        self._local_size = ctk.CTkLabel(
+            self._local_inner, text="",
+            font=self._font_caption(), text_color=self._palette()["muted"],
         )
-        self.btn_download.pack(side="left", padx=4)
-        self.btn_delete = self._danger_btn(btn_row, "删除", self._on_delete, 88)
-        self.btn_delete.pack(side="left", padx=4)
+        self._local_size.grid(row=2, column=0, pady=(4, 10))
+        self.btn_browse = self._btn_secondary(self._local_inner, "选择文件", self._on_browse_local, 100)
+        self.btn_browse.grid(row=3, column=0, pady=(0, 16))
 
-    def _build_progress_card(self) -> None:
-        self._progress_card = self._card(self, 4, pady=8)
-        self._section_title(self._progress_card, 0, "传输进度")
+    def _build_progress_strip(self) -> None:
+        p = self._palette()
+        self._progress_outer = self._panel(self)
+        self._progress_outer.grid(row=4, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self._progress_outer.grid_columnconfigure(0, weight=1)
+
+        head = ctk.CTkFrame(self._progress_outer, fg_color="transparent")
+        head.grid(row=0, column=0, padx=12, pady=(10, 6), sticky="ew")
+        head.grid_columnconfigure(1, weight=1)
+
+        self._progress_lbl = ctk.CTkLabel(
+            head, text="传输进度", font=self._font_caption(),
+            text_color=p["muted"], anchor="w",
+        )
+        self._progress_lbl.grid(row=0, column=0, sticky="w")
 
         self.lbl_progress = ctk.CTkLabel(
-            self._progress_card,
-            text="等待传输任务…",
-            font=self._font_body(),
-            text_color=_PALETTE["light"]["muted"],
+            head, text="空闲", font=self._font_caption(),
+            text_color=p["muted"], anchor="e",
         )
-        self.lbl_progress.grid(row=1, column=0, padx=16, pady=(0, 6), sticky="w")
+        self.lbl_progress.grid(row=0, column=1, sticky="e")
 
         self.progress_bar = ctk.CTkProgressBar(
-            self._progress_card,
-            height=10,
-            corner_radius=5,
-            progress_color=_PALETTE["light"]["primary"],
+            self._progress_outer, height=10, corner_radius=5,
+            progress_color=p["primary"], fg_color=p["track"],
         )
-        self.progress_bar.grid(row=2, column=0, padx=16, pady=(0, 14), sticky="ew")
+        self.progress_bar.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
         self.progress_bar.set(0)
 
-    def _build_log_card(self) -> None:
-        self._log_card = self._card(self, 5, pady=(8, 16))
-        self._log_card.grid_rowconfigure(1, weight=1)
-        self._section_title(self._log_card, 0, "运行日志", "记录连接、登录与传输操作")
+    def _build_log_area(self) -> None:
+        self._log_panel = self._panel(self)
+        self._log_panel.grid(row=5, column=0, padx=20, pady=(0, 16), sticky="nsew")
+        self._log_panel.grid_columnconfigure(0, weight=1)
+        self._log_panel.grid_rowconfigure(1, weight=1)
+
+        self._log_hdr = ctk.CTkLabel(
+            self._log_panel, text="日志", font=self._font_caption(),
+            text_color=self._palette()["muted"], anchor="w",
+        )
+        self._log_hdr.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
 
         self.txt_log = ctk.CTkTextbox(
-            self._log_card,
-            height=140,
-            font=self._font_mono(),
-            corner_radius=10,
-            fg_color=_PALETTE["light"]["surface2"],
-            border_width=1,
-            border_color=_PALETTE["light"]["border"],
+            self._log_panel, font=self._font_log(), corner_radius=8,
+            fg_color="transparent", border_width=0, activate_scrollbars=True,
+            wrap="word", spacing1=2, spacing2=2,
         )
-        self.txt_log.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="nsew")
+        self.txt_log.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
         self.txt_log.configure(state="disabled")
 
-    # ── 文件列表（可点击行） ────────────────────────────────────
+    # ── 主题 ──────────────────────────────────────────────
+
+    def _apply_theme(self) -> None:
+        p = self._palette()
+        self.configure(fg_color=p["bg"])
+        self._header.configure(fg_color=p["surface"])
+        self._header_line.configure(fg_color=p["border"])
+        self._title_lbl.configure(text_color=p["text"])
+        self._port_hint.configure(text_color=p["muted"])
+        self._brand_icon.configure(fg_color=p["primary"])
+        self._file_title.configure(text_color=p["text"])
+
+        for panel in (self._remote_panel, self._local_panel, self._progress_outer, self._log_panel):
+            panel.configure(fg_color=p["panel"], border_color=p["border"])
+
+        for hdr in (self._remote_hdr, self._local_hdr, self._log_hdr, self._progress_lbl):
+            hdr.configure(text_color=p["muted"])
+
+        self.progress_bar.configure(progress_color=p["primary"], fg_color=p["track"])
+
+        for entry in (self.entry_host, self.entry_port, self.entry_user, self.entry_pass):
+            entry.configure(fg_color=p["surface"], border_color=p["border"])
+
+        self._remote_empty_icon.configure(text_color=p["muted"])
+        self._remote_empty.configure(text_color=p["muted"])
+        self._local_icon.configure(text_color=p["muted"])
+        if not self._selected_local:
+            self.lbl_local.configure(text_color=p["muted"])
+        self._local_size.configure(text_color=p["muted"])
+
+        self._refresh_file_row_styles()
+        self._update_status_badges()
+
+    def _on_theme_seg(self, value: str) -> None:
+        mode = "dark" if value == "深色" else "light"
+        self._appearance = mode
+        ctk.set_appearance_mode(mode)
+        self._apply_theme()
+
+    def _on_ui_style_change(self, style_name: str) -> None:
+        pass  # 兼容旧接口
+
+    def _on_theme_change(self, mode: str) -> None:
+        self._appearance = mode
+        ctk.set_appearance_mode(mode)
+        self._apply_theme()
+
+    # ── 文件列表 ──────────────────────────────────────────────
 
     def _clear_remote_list(self) -> None:
         for row in self._file_row_frames:
@@ -491,15 +471,13 @@ class FileTransferApp(ctk.CTk):
 
     def _refresh_file_row_styles(self) -> None:
         p = self._palette()
-        self._remote_scroll.configure(fg_color=p["surface2"], border_color=p["border"])
         for idx, row in enumerate(self._file_row_frames):
             selected = idx == self._selected_remote_idx
             row.configure(fg_color=p["primary_soft"] if selected else "transparent")
-            for child in row.winfo_children():
-                if isinstance(child, ctk.CTkLabel):
-                    child.configure(
-                        text_color=p["primary"] if selected else p["text"],
-                    )
+            children = row.winfo_children()
+            if len(children) >= 2:
+                children[0].configure(text_color=p["primary"] if selected else p["text"])
+                children[1].configure(text_color=p["muted"])
 
     def _select_remote_idx(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._remote_files):
@@ -508,85 +486,76 @@ class FileTransferApp(ctk.CTk):
         self._selected_remote = self._remote_files[idx]["name"]
         self._refresh_file_row_styles()
 
-    def _render_remote_files(self, files: List[Dict[str, int]]) -> None:
-        self._clear_remote_list()
+    def _show_remote_empty(self, text: str) -> None:
+        self._remote_empty_icon.grid()
+        self._remote_empty.configure(text=text)
+        self._remote_empty.grid()
+
+    def _hide_remote_empty(self) -> None:
+        self._remote_empty_icon.grid_remove()
         self._remote_empty.grid_remove()
 
+    def _render_remote_files(self, files: List[Dict[str, int]]) -> None:
+        self._clear_remote_list()
         if not files:
-            self._remote_empty.configure(text="远端暂无文件")
-            self._remote_empty.grid()
+            self._show_remote_empty("暂无文件")
             return
 
+        self._hide_remote_empty()
         p = self._palette()
+
         for idx, item in enumerate(files):
             name = item["name"]
-            size_kb = item["size"] / 1024.0
+            size_txt = self._fmt_size(item["size"])
 
-            row = ctk.CTkFrame(self._remote_scroll, fg_color="transparent", corner_radius=8, height=40)
-            row.grid(row=idx, column=0, sticky="ew", pady=2)
-            row.grid_columnconfigure(1, weight=1)
+            row = ctk.CTkFrame(self._remote_scroll, fg_color="transparent", corner_radius=6, height=36)
+            row.grid(row=idx, column=0, sticky="ew", pady=1)
+            row.grid_columnconfigure(0, weight=1)
             self._file_row_frames.append(row)
 
-            icon = "📄" if size_kb < 1024 else "📦"
-            ctk.CTkLabel(row, text=icon, width=28, font=self._font_body()).grid(row=0, column=0, padx=(8, 4))
-            ctk.CTkLabel(
-                row,
-                text=name,
-                font=self._font_body(),
-                anchor="w",
+            name_lbl = ctk.CTkLabel(
+                row, text=name, font=self._font_body(), anchor="w",
                 text_color=p["text"],
-            ).grid(row=0, column=1, sticky="ew")
-            ctk.CTkLabel(
-                row,
-                text=f"{size_kb:.1f} KB",
-                font=self._font_body(),
-                text_color=p["muted"],
-            ).grid(row=0, column=2, padx=(4, 10))
+            )
+            name_lbl.grid(row=0, column=0, padx=(10, 4), sticky="ew")
+            size_lbl = ctk.CTkLabel(
+                row, text=size_txt, font=self._font_caption(),
+                text_color=p["muted"], width=72, anchor="e",
+            )
+            size_lbl.grid(row=0, column=1, padx=(0, 10))
 
             def bind_click(widget, i=idx):
                 widget.bind("<Button-1>", lambda _e, j=i: self._select_remote_idx(j))
 
-            bind_click(row)
-            for child in row.winfo_children():
-                bind_click(child)
+            for w in (row, name_lbl, size_lbl):
+                bind_click(w)
 
         self._refresh_file_row_styles()
 
-    # ── 状态徽章 ──────────────────────────────────────────────
+    # ── 状态 ──────────────────────────────────────────────
+
+    def _set_badge(self, lbl: ctk.CTkLabel, text: str, *, kind: str) -> None:
+        p = self._palette()
+        styles = {
+            "ok": (p["success"], p["success_soft"]),
+            "warn": (p["warn"], p["warn_soft"]),
+            "muted": (p["muted"], p["panel"]),
+        }
+        fg, bg = styles.get(kind, styles["muted"])
+        lbl.configure(text=text, text_color=fg, fg_color=bg)
 
     def _update_status_badges(self) -> None:
-        p = self._palette()
         if self.client.is_connected:
-            self._lbl_conn_status.configure(text="● 已连接", text_color=p["success"])
+            self._set_badge(self._lbl_conn_status, "已连接", kind="ok")
         else:
-            self._lbl_conn_status.configure(text="● 未连接", text_color=p["muted"])
+            self._set_badge(self._lbl_conn_status, "未连接", kind="muted")
 
         if self.client.is_logged_in:
-            self.lbl_auth.configure(
-                text="已登录",
-                text_color=p["success"],
-                fg_color=p["success_soft"],
-            )
+            self._set_badge(self._lbl_auth_status, "已登录", kind="ok")
         else:
-            self.lbl_auth.configure(
-                text="未登录",
-                text_color=p["warn"],
-                fg_color=p["warn_soft"],
-            )
+            self._set_badge(self._lbl_auth_status, "未登录", kind="warn")
 
-    def _on_ui_style_change(self, style_name: str) -> None:
-        mode = self._ui_styles.get(style_name, "light")
-        self._appearance = "light" if mode == "light" else ("dark" if mode == "dark" else "system")
-        ctk.set_appearance_mode(mode)
-        self._apply_theme()
-        self._append_log(f"已切换主题：{style_name}")
-
-    def _on_theme_change(self, mode: str) -> None:
-        self._appearance = mode
-        ctk.set_appearance_mode(mode)
-        self._apply_theme()
-
-    # ── 日志与进度 ──────────────────────────────────────────────
+    # ── 回调 ──────────────────────────────────────────────
 
     def _append_log(self, message: str) -> None:
         def _write() -> None:
@@ -602,17 +571,14 @@ class FileTransferApp(ctk.CTk):
 
     def _update_progress(self, percent: float, desc: str) -> None:
         def _ui() -> None:
-            value = max(0.0, min(1.0, percent / 100.0))
-            self.progress_bar.set(value)
+            self.progress_bar.set(max(0.0, min(1.0, percent / 100.0)))
             p = self._palette()
-            self.lbl_progress.configure(
-                text=f"{percent:.1f}%  ·  {desc}",
-                text_color=p["text"] if percent > 0 else p["muted"],
-            )
+            if percent > 0:
+                self.lbl_progress.configure(text=f"{percent:.0f}%  {desc}", text_color=p["text"])
+            else:
+                self.lbl_progress.configure(text="空闲", text_color=p["muted"])
 
         self._run_on_ui(_ui)
-
-    # ── 客户端回调 ──────────────────────────────────────────────
 
     def _on_auth_result(self, success: bool, message: str) -> None:
         def _ui() -> None:
@@ -633,7 +599,7 @@ class FileTransferApp(ctk.CTk):
 
     def _on_transfer_done(self, message: str) -> None:
         def _ui() -> None:
-            messagebox.showinfo("传输完成", message)
+            messagebox.showinfo("完成", message)
             if self.client.is_logged_in:
                 self._on_refresh_list()
 
@@ -641,11 +607,11 @@ class FileTransferApp(ctk.CTk):
 
     def _on_error(self, message: str) -> None:
         def _ui() -> None:
-            messagebox.showerror("操作错误", message)
+            messagebox.showerror("错误", message)
 
         self._run_on_ui(_ui)
 
-    # ── 用户操作 ──────────────────────────────────────────────
+    # ── 操作 ──────────────────────────────────────────────
 
     def _get_host_port(self) -> tuple:
         host = self.entry_host.get().strip()
@@ -658,6 +624,46 @@ class FileTransferApp(ctk.CTk):
             raise ValueError("端口必须是数字") from exc
         return host, port
 
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        for btn in (
+            self.btn_connect,
+            self.btn_disconnect,
+            self.btn_login,
+            self.btn_refresh,
+            self.btn_upload,
+            self.btn_download,
+            self.btn_delete,
+            self.btn_browse,
+        ):
+            btn.configure(state=state)
+
+    def _run_task(self, task, task_name: str, *, on_done=None) -> None:
+        if self._busy:
+            return
+
+        def _ui_busy(v: bool) -> None:
+            self._set_busy(v)
+
+        self._run_on_ui(lambda: _ui_busy(True))
+
+        def wrapper() -> None:
+            try:
+                task()
+                if on_done:
+                    self._run_on_ui(on_done)
+            except Exception as exc:
+                msg = f"{task_name}失败: {exc}"
+                self._append_log(msg)
+                self._run_on_ui(lambda: messagebox.showerror("错误", msg))
+                if on_done:
+                    self._run_on_ui(on_done)
+            finally:
+                self._run_on_ui(lambda: _ui_busy(False))
+
+        threading.Thread(target=wrapper, daemon=True).start()
+
     def _on_connect(self) -> None:
         try:
             host, port = self._get_host_port()
@@ -667,28 +673,38 @@ class FileTransferApp(ctk.CTk):
 
         def _task() -> None:
             self.client.connect(host, port)
-            self._run_on_ui(self._update_status_badges)
 
-        self.client.run_in_thread(_task, "连接")
+        self._run_task(_task, "连接", on_done=self._update_status_badges)
 
     def _on_disconnect(self) -> None:
-        self.client.run_in_thread(self.client.disconnect, "断开")
-        self._update_status_badges()
+        def _task() -> None:
+            self.client.disconnect()
+
+        self._run_task(_task, "断开", on_done=self._update_status_badges)
 
     def _on_login(self) -> None:
-        if not self.client.is_connected:
-            messagebox.showwarning("提示", "请先连接服务器")
-            return
         username = self.entry_user.get().strip()
         password = self.entry_pass.get()
         if not username or not password:
             messagebox.showwarning("提示", "请输入用户名和密码")
             return
-        self.client.run_in_thread(lambda: self.client.login(username, password), "登录")
+        try:
+            host, port = self._get_host_port()
+        except ValueError as exc:
+            messagebox.showwarning("输入错误", str(exc))
+            return
+
+        def _task() -> None:
+            # 未连接时自动连服务器，避免「先点连接、马上点登录」的竞态
+            if not self.client.is_connected:
+                self.client.connect(host, port)
+            self.client.login(username, password)
+
+        self._run_task(_task, "登录", on_done=self._update_status_badges)
 
     def _on_refresh_list(self) -> None:
         if not self.client.is_logged_in:
-            messagebox.showwarning("提示", "请先登录后再查看远端文件列表")
+            messagebox.showwarning("提示", "请先登录")
             return
         self.client.run_in_thread(self.client.list_files, "获取文件列表")
 
@@ -697,49 +713,41 @@ class FileTransferApp(ctk.CTk):
         if path:
             self._selected_local = path
             name = os.path.basename(path)
-            size_kb = os.path.getsize(path) / 1024.0
+            size = os.path.getsize(path)
             p = self._palette()
-            self.lbl_local.configure(
-                text=f"{name}\n{size_kb:.1f} KB",
-                text_color=p["text"],
-            )
-
-    def _on_remote_select(self, _event=None) -> None:
-        pass  # 已由 _select_remote_idx 处理
+            self.lbl_local.configure(text=name, text_color=p["text"])
+            self._local_size.configure(text=self._fmt_size(size))
 
     def _on_upload(self) -> None:
         if not self.client.is_logged_in:
-            messagebox.showwarning("需要登录", "请先登录后再上传文件")
+            messagebox.showwarning("提示", "请先登录")
             return
         if not self._selected_local:
-            messagebox.showwarning("提示", "请先选择要上传的本地文件")
+            messagebox.showwarning("提示", "请先选择文件")
             return
-        path = self._selected_local
         self.progress_bar.set(0)
-        self.client.run_in_thread(lambda: self.client.upload_file(path), "上传")
+        self.client.run_in_thread(lambda: self.client.upload_file(self._selected_local), "上传")
 
     def _on_download(self) -> None:
         if not self.client.is_logged_in:
-            messagebox.showwarning("需要登录", "请先登录后再下载文件")
+            messagebox.showwarning("提示", "请先登录")
             return
         if not self._selected_remote:
-            messagebox.showwarning("提示", "请先在远端列表中选择要下载的文件")
+            messagebox.showwarning("提示", "请先选择远端文件")
             return
-        name = self._selected_remote
         self.progress_bar.set(0)
-        self.client.run_in_thread(lambda: self.client.download_file(name), "下载")
+        self.client.run_in_thread(lambda: self.client.download_file(self._selected_remote), "下载")
 
     def _on_delete(self) -> None:
         if not self.client.is_logged_in:
-            messagebox.showwarning("需要登录", "请先登录后再删除文件")
+            messagebox.showwarning("提示", "请先登录")
             return
         if not self._selected_remote:
-            messagebox.showwarning("提示", "请先在远端列表中选择要删除的文件")
+            messagebox.showwarning("提示", "请先选择远端文件")
             return
-        name = self._selected_remote
-        if not messagebox.askyesno("确认删除", f"确定要删除服务器上的文件吗？\n\n{name}"):
+        if not messagebox.askyesno("确认删除", f"确定删除？\n\n{self._selected_remote}"):
             return
-        self.client.run_in_thread(lambda: self.client.delete_file(name), "删除")
+        self.client.run_in_thread(lambda: self.client.delete_file(self._selected_remote), "删除")
 
 
 def main() -> None:

@@ -1,8 +1,21 @@
 # TCP 文件传输系统
 
-基于 Python 3 的 TCP 文件传输实验项目，包含多线程并发服务器、自定义 FTCP 应用层协议、4096 字节分块缓存读写、**浏览器 Web 控制台**（简约商务风），以及 **CustomTkinter 桌面客户端**（与 Web 统一的靛蓝商务主题）。
+**TCP/IP 协议的应用** — 基于 Python 3 与 Socket API 的 TCP 文件传输实验项目。
 
-服务端已集成 **SQLite 持久化**、**SHA-256 密码哈希**、**`.tmp` 断点容错**、**Socket 超时防死线程** 与 **客户端预哈希防抓包** 等加固特性。
+本项目实现服务器端与客户端应用程序，满足身份验证、文件上传/下载、分块缓存读写等实验要求；在基础功能之上扩展了 **自定义 FTCP 应用层协议**、**多线程并发服务器**、**SQLite 持久化**、**SHA-256 密码哈希**、**`.tmp` 断点容错**、**Socket 超时防死线程**、**浏览器 Web 控制台**（简约商务风）与 **CustomTkinter 桌面客户端**（靛蓝商务主题）。
+
+---
+
+## 实验要求对照
+
+| 实验要求 | 本项目实现 |
+|----------------------------------------|------------|
+| 包含服务器应用程序与客户应用程序 | `server/server.py` + `client/tcp_client.py` / `client/client_ui.py` |
+| 用户身份验证，上传/下载前须登录 | FTCP `CMD_LOGIN` + HTTP `/api/login`，未登录拒绝文件操作 |
+| 验证失败返回细分错误信息 | 区分 **「用户名错误」** 与 **「密码错误」** |
+| 理解发送缓存 / 接收缓存与文件读写 | `read(4096)` → `sendall` / `recv_exact` → `write`，4096 字节分块 |
+| 支持任意类型文件（文本/图片/视频等） | 二进制模式 `rb`/`wb` 传输，不限制扩展名 |
+| 客户端上传、服务器下载的双向传输 | 客户端 `upload_file` / `download_file`，服务端对称处理 |
 
 ---
 
@@ -10,12 +23,13 @@
 
 | 组件 | Python | 依赖 | 运行位置 |
 |------|--------|------|----------|
-| **服务端** | 3.6+（推荐 3.8+） | 标准库即可（`sqlite3`、`hashlib` 等） | 本机 / 云服务器 |
+| **服务端** | 3.6+（推荐 3.8+） | 标准库（`socket`、`sqlite3`、`hashlib`、`threading` 等） | 本机 / 云服务器 |
 | **Web 控制台** | — | 现代浏览器（支持 Web Crypto API） | 任意设备浏览器 |
 | **桌面客户端** | **3.8 及以上** | `customtkinter` | **须在本地电脑运行**（需图形界面） |
 
 ```bash
-pip install customtkinter   # 仅运行 client_ui.py 时需要
+pip install -r client/requirements.txt
+# 或：pip install customtkinter
 ```
 
 > **桌面客户端无法在纯命令行云服务器上直接启动**：需要 Python 3.8+、图形界面（Windows / macOS / 带桌面的 Linux）及 `customtkinter`。实验复现时，请在本机同时运行服务端与桌面端，通过 `127.0.0.1` 连接，**无需公网服务器**。
@@ -27,23 +41,124 @@ pip install customtkinter   # 仅运行 client_ui.py 时需要
 ```
 socket_TCP/
 ├── server/
-│   ├── server.py           # 主程序：FTCP + HTTP 分流，Socket 超时，.tmp 上传
+│   ├── server.py           # 主程序：FTCP 协议 + HTTP 分流 + 多线程并发
 │   ├── database.py         # SQLite 用户凭证与文件元数据（ftcp.db）
 │   ├── migrate_users.py    # 一次性迁移：users.json 明文 → 哈希入库
 │   ├── http_handler.py     # Web REST API（登录/列表/上传/下载/删除）
-│   ├── prefixed_socket.py  # Socket 前缀缓冲（协议分流辅助）
-│   ├── web/index.html      # Web 控制台（太阳/月亮主题切换）
-│   ├── ftcp.db             # SQLite 数据库（首次启动或迁移后生成）
+│   ├── prefixed_socket.py  # Socket 前缀缓冲（协议分流后复用已窥探字节）
+│   ├── web/index.html      # Web 控制台（太阳/月亮主题切换 + 实验理论日志）
+│   ├── users.json          # 迁移后仅占位说明（凭证在 ftcp.db）
 │   ├── users.json.bak      # 迁移前的用户凭证备份
+│   ├── ftcp.db             # SQLite 数据库（首次启动或迁移后生成）
 │   └── storage/            # 服务端文件存储（自动创建）
 ├── client/
-│   ├── client_ui.py        # 桌面 GUI（简约商务风，本地运行）
-│   ├── tcp_client.py       # FTCP 通信核心（预哈希登录、.tmp 下载）
-│   ├── requirements.txt
+│   ├── client_ui.py        # 桌面 GUI（CustomTkinter，网络 I/O 在子线程）
+│   ├── tcp_client.py       # FTCP 通信核心（预哈希登录、分块传输、.tmp 下载）
+│   ├── requirements.txt    # 客户端依赖（customtkinter）
 │   └── downloads/          # 客户端下载目录（自动创建）
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## 系统架构
+
+```mermaid
+flowchart TB
+    subgraph clients [客户端]
+        GUI["client_ui.py\nCustomTkinter GUI"]
+        TCP["tcp_client.py\nFTCP 协议栈"]
+        WEB["web/index.html\n浏览器 HTTP"]
+        GUI --> TCP
+    end
+
+    subgraph server [服务端 server.py :8082]
+        ACCEPT["accept() 主循环"]
+        DISPATCH["dispatch_connection()\nMSG_PEEK 协议分流"]
+        FTCP["client_handler()\nFTCP 工作线程"]
+        HTTP["http_handler.py\nHTTP 工作线程"]
+        ACCEPT --> DISPATCH
+        DISPATCH -->|魔数 FTCP| FTCP
+        DISPATCH -->|GET/POST 等| HTTP
+    end
+
+    subgraph storage [共享存储]
+        DB["ftcp.db\nusers + files_meta"]
+        FILES["storage/\n二进制文件"]
+    end
+
+    TCP -->|TCP Socket| DISPATCH
+    WEB -->|HTTP| DISPATCH
+    FTCP --> DB
+    FTCP --> FILES
+    HTTP --> DB
+    HTTP --> FILES
+```
+
+**同一端口双协议**：服务端在 `8082` 端口监听，通过 `MSG_PEEK` 窥探连接首 4 字节——`FTCP` 走自定义协议线程，`GET `/`POST` 等走 HTTP 线程，分流在独立线程中执行，避免阻塞 `accept`。
+
+---
+
+## Socket API 调用流程
+
+### 服务端（`server.py`）
+
+| 步骤 | 系统调用 / API | 代码位置 | 说明 |
+|------|----------------|----------|------|
+| 1 | `socket()` | `main()` | 创建 `AF_INET` + `SOCK_STREAM` TCP 套接字 |
+| 2 | `setsockopt(SO_REUSEADDR)` | `main()` | 允许端口快速重用 |
+| 3 | `bind((0.0.0.0, 8082))` | `main()` | 绑定所有网卡，允许本机与公网访问 |
+| 4 | `listen(128)` | `main()` | 进入被动监听，支持并发排队 |
+| 5 | `accept()` | `main()` 主循环 | 提取客户端连接，每连接派生工作线程 |
+| 6 | `recv()` / `sendall()` | `recv_exact` / `send_frame` | 精确读写，解决 TCP 粘包 |
+| 7 | `close()` | `client_handler` finally | 会话结束释放套接字 |
+
+### 客户端（`tcp_client.py`）
+
+| 步骤 | 系统调用 / API | 代码位置 | 说明 |
+|------|----------------|----------|------|
+| 1 | `socket()` | `connect()` | 创建 TCP 套接字 |
+| 2 | `connect((host, port))` | `connect()` | 连接远端服务器 |
+| 3 | `sendall()` | `send_frame()` + 分块发送 | 发送报文头与文件数据 |
+| 4 | `recv()` | `recv_exact()` | 循环读满指定字节数 |
+| 5 | `close()` | `disconnect()` | 断开连接 |
+
+---
+
+## 程序设计流程
+
+### 服务端主流程
+
+```
+启动 server.py
+  → init_db() 初始化 SQLite 表
+  → sync_storage_files() 将 storage 历史文件补录入库
+  → socket → bind → listen
+  → 循环 accept()
+      → 新线程 dispatch_connection()
+          → MSG_PEEK 首 4 字节
+          → HTTP → handle_http_connection()
+          → FTCP → client_handler()
+              → settimeout(120s)
+              → 循环 parse_header() 解析命令
+                  → CMD_LOGIN：database.authenticate() 零知识比对
+                  → CMD_LIST / UPLOAD / DOWNLOAD / DELETE（须已登录）
+```
+
+### 客户端主流程（桌面 GUI）
+
+```
+启动 client_ui.py
+  → 用户填写 IP:端口 → connect()
+  → 用户输入明文密码 → 本地 SHA-256 哈希 → login()
+  → 刷新列表 list_files()
+  → 上传：选择本地文件 → upload_file()（read 4096 + send + 等待 ACK）
+  → 下载：选中远端文件 → download_file()（recv 4096 + write .tmp → rename）
+  → 删除：delete_file() → 刷新列表
+```
+
+所有阻塞型 Socket 操作通过 `run_in_thread()` 在守护子线程执行，GUI 主线程仅通过回调更新界面。
 
 ---
 
@@ -56,11 +171,11 @@ socket_TCP/
 | 文件列表（SQLite 元数据） | ✅ | ✅ |
 | 文件上传（进度显示 + .tmp 容错） | ✅ | ✅ |
 | 文件下载（客户端 .tmp 容错） | ✅ | ✅ |
-| **文件删除** | ✅ | ✅ |
+| 文件删除 | ✅ | ✅ |
 | 上传 ACK 确认（FTCP） | — | ✅ |
 | 实验理论日志 | ✅ | — |
 | 日志面板拖拽调整高度 | ✅ | — |
-| 浅色 / 深色主题切换 | ✅（太阳/月亮） | ✅（简约浅色/深色/跟随系统） |
+| 浅色 / 深色主题切换 | ✅| ✅|
 
 ---
 
@@ -73,7 +188,7 @@ socket_TCP/
 ```bash
 cd server
 python migrate_users.py   # 首次运行：将 users.json 明文密码哈希写入 ftcp.db
-python server.py          # Windows 下也可用 python3
+python server.py        # Windows 下也可用 python3
 ```
 
 启动成功示例：
@@ -91,7 +206,7 @@ Web 控制台访问 -> http://<公网IP>:8082/
 
 ```bash
 cd client
-pip install customtkinter
+pip install -r requirements.txt
 python client_ui.py
 ```
 
@@ -99,9 +214,9 @@ python client_ui.py
 
 1. 服务器 IP 填 **`127.0.0.1`**，端口 **`8082`**（默认已填好）→ 点击 **连接**
 2. 输入账号密码 → 点击 **登录**（界面输入明文，程序自动哈希后发送）
-3. 点击 **↻ 刷新列表** 查看远端文件
-4. **浏览本地文件** 选择待上传文件 → **↑ 上传**
-5. 在远端列表中点击选中文件 → **↓ 下载** 或 **删除**
+3. 点击 **刷新** 查看远端文件
+4. **选择文件** 选择待上传文件 → **上传**
+5. 在远端列表中点击选中文件 → **下载** 或 **删除**
 
 下载的文件保存在 `client/downloads/` 目录。
 
@@ -112,13 +227,16 @@ python client_ui.py
 | 正确登录 | `admin` / `admin123` | 状态显示「已登录」，弹窗提示成功 |
 | 密码错误 | 正确用户名 + 错误密码 | 弹窗「密码错误」 |
 | 用户名错误 | 不存在的用户名 | 弹窗「用户名错误」 |
+| 未登录操作 | 未登录时点击上传/下载 | 提示「请先登录」 |
 | 小文件上传 | 上传约 10KB 文本文件 | 进度条走完，列表中出现新文件 |
 | 大文件分块 | 上传较大文件（如 PDF） | 进度条实时更新，上传完成后收到 ACK |
 | 文件下载 | 选中远端文件 → 下载 | `client/downloads/` 中出现完整文件 |
+| 文件删除 | 选中远端文件 → 删除 | 列表刷新后文件消失 |
+| 二进制文件 | 上传图片/视频 | 下载后文件可正常打开 |
 
 ### 5. 可选：Web 控制台
 
-浏览器访问 **`http://127.0.0.1:8082/`**，可在同一服务端上通过 HTTP 完成相同操作，底部日志区含 `[理论]` 实验要点说明。
+浏览器访问 **`http://127.0.0.1:8082/`**，可在同一服务端上通过 HTTP 完成相同操作。底部日志区含 `[理论]` 标签的 TCP/Socket/粘包/分块/安全设计等实验要点说明，适合截图写入实验报告。
 
 ---
 
@@ -130,6 +248,12 @@ python client_ui.py
 | student | tcp2026 |
 
 登录时界面仍输入**明文密码**；客户端 / 浏览器会在本地完成 SHA-256 加盐哈希后再发送，服务端数据库中存储的是哈希值。
+
+哈希算法（客户端与服务端一致）：
+
+```
+SHA-256("FTCP_FILE_TRANSFER_SALT_2026:" + username + ":" + 明文密码)
+```
 
 登录失败时返回 **「用户名错误」** 或 **「密码错误」**（Web Toast / 桌面弹窗）。
 
@@ -143,20 +267,14 @@ python client_ui.py
 
 界面采用与 Web 控制台一致的**简约商务风**（靛蓝主色、卡片分区、状态徽章）：
 
-- **顶部导航**：品牌栏 + 连接状态（● 已连接 / 未连接）+ 主题切换
+- **顶部导航**：品牌栏 + 连接状态（已连接 / 未连接）+ 登录状态徽章 + 主题切换
 - **连接设置**：服务器 IP / 端口 / 连接 / 断开
-- **身份验证**：用户名 / 密码 / 登录，右侧显示登录状态徽章
-- **文件管理**：可点击的远端文件列表 + 本地文件选择区 + 操作按钮
+- **身份验证**：用户名 / 密码 / 登录（未连接时点击登录会自动先连接）
+- **文件管理**：可点击的远端文件列表 + 本地文件选择区 + 刷新/上传/下载/删除
 - **传输进度**：细进度条 + 百分比与描述
-- **运行日志**：等宽字体操作记录
+- **运行日志**：操作记录面板
 
-**主题预设**（右上角下拉）：
-
-| 预设 | 说明 |
-|------|------|
-| 简约浅色（默认） | 浅灰背景 + 靛蓝强调，与 Web 控制台一致 |
-| 简约深色 | 深蓝灰背景 + 浅靛蓝强调 |
-| 跟随系统 | 跟随操作系统浅/深色模式 |
+**主题**（右上角分段按钮）：**浅色**（默认）/ **深色**
 
 ### Web 控制台
 
@@ -235,6 +353,8 @@ cd server && python3 server.py
 | POST | `/api/delete` | 删除，JSON `{name: "文件名"}` | ✅ |
 | DELETE | `/api/delete?name=xxx` | 删除（兼容写法） | ✅ |
 
+HTTP 登录态通过 `Set-Cookie: session=<token>` 维护，文件操作前校验 Session。
+
 ---
 
 ## FTCP 自定义协议（防粘包）
@@ -253,19 +373,34 @@ cd server && python3 server.py
 | 命令 | 值 | 说明 |
 |------|-----|------|
 | CMD_LOGIN | 0x01 | 登录请求（password 字段为 SHA-256 哈希） |
-| CMD_LOGIN_RESP | 0x02 | 登录响应 |
+| CMD_LOGIN_RESP | 0x02 | 登录响应（status + message） |
 | CMD_LIST | 0x03 | 文件列表 |
 | CMD_LIST_RESP | 0x04 | 列表响应 |
-| CMD_UPLOAD | 0x05 | 上传 |
-| CMD_DOWNLOAD | 0x06 | 下载 |
+| CMD_UPLOAD | 0x05 | 上传（元数据帧 + 文件流） |
+| CMD_DOWNLOAD | 0x06 | 下载（元数据帧 + 文件流） |
 | CMD_ERROR | 0x07 | 错误 |
 | CMD_UPLOAD_ACK | 0x08 | 上传完成确认 |
 | CMD_DELETE | 0x09 | 删除文件 |
 | CMD_DELETE_RESP | 0x0A | 删除响应 |
 
-**防粘包**：`recv_exact(n)` 循环读满 n 字节；文件元数据为 `filename_len(4) + file_size(8) + filename`；文件体按 **4096 字节** 分块传输。
+**防粘包**：`recv_exact(n)` 循环 `recv` 直到读满 n 字节；文件元数据为 `filename_len(4) + file_size(8) + filename`；文件体按 **4096 字节** 分块传输。
 
-**协议分流**：连接首 4 字节为 `GET `/`POST` 等 → HTTP；为 `FTCP` → FTCP 客户端。分流逻辑在独立线程中执行，避免阻塞新连接接入。
+**登录 Payload 格式**：`username_len(2) + username + password_hash_len(2) + password_hash`
+
+**上传流程**：客户端发 `CMD_UPLOAD`（含元数据）→ 分块 `sendall` 文件体 → 服务端写 `.tmp` → 收齐后 `rename` + 写 SQLite → 回复 `CMD_UPLOAD_ACK`
+
+**下载流程**：客户端发 `CMD_DOWNLOAD`（含文件名）→ 服务端回 `CMD_DOWNLOAD`（含元数据）→ 分块 `sendall` 文件体 → 客户端写 `.tmp` → 收齐后 `rename`
+
+---
+
+## 数据库设计（`ftcp.db`）
+
+| 表 | 字段 | 说明 |
+|----|------|------|
+| `users` | `username` (PK), `hashed_password` | 用户凭证，仅存 SHA-256 哈希 |
+| `files_meta` | `id`, `filename` (UNIQUE), `uploader`, `upload_time`, `file_size` | 文件元数据，列表接口数据源 |
+
+服务端启动时 `sync_storage_files()` 会将 `storage/` 中已有文件自动补录入 `files_meta`，避免历史文件丢失元数据。
 
 ---
 
@@ -281,14 +416,14 @@ cd server && python3 server.py
 ### 2. 密码哈希与防抓包
 
 - 数据库存储 **SHA-256(盐 + 用户名 + 明文密码)**，不存明文
-- Web / FTCP 客户端在**本地**完成哈希，网络上传输 64 位十六进制摘要
+- Web（Web Crypto API）/ FTCP 客户端在**本地**完成哈希，网络上传输 64 位十六进制摘要
 - 服务端 `authenticate()` 直接比对哈希，零知识验证思路（无 TLS 下的折中方案）
 
 ### 3. `.tmp` 断点容错（上传 / 下载对称）
 
 | 端 | 行为 |
 |----|------|
-| **服务端上传** | 先写 `storage/文件名.tmp` → 收齐后 `rename` → 写 SQLite |
+| **服务端 FTCP 上传** | 先写 `storage/文件名.tmp` → 收齐后 `rename` → 写 SQLite |
 | **服务端 HTTP 上传** | 同上 |
 | **客户端下载** | 先写 `downloads/文件名.tmp` → 收齐后 `rename` |
 | **断线异常** | `except` 块立即 `os.remove(.tmp)`，防止残缺文件占盘 |
@@ -298,17 +433,38 @@ cd server && python3 server.py
 - 每个 FTCP 连接设置 `conn.settimeout(120.0)`（2 分钟无活动超时）
 - 捕获 `socket.timeout` 后优雅关闭 Socket，释放工作线程，防止资源枯竭
 
+### 5. 路径安全
+
+- 文件名统一 `os.path.basename()` 处理，防止 `../` 路径穿越
+
+---
+
+## 核心模块说明
+
+| 文件 | 职责 |
+|------|------|
+| `server/server.py` | TCP 监听、协议分流、FTCP 命令分发、分块读写、上传 ACK |
+| `server/database.py` | SQLite 建表、用户认证、文件元数据 CRUD、密码哈希 |
+| `server/http_handler.py` | HTTP 页面与 REST API、Session 管理、multipart 上传解析 |
+| `server/prefixed_socket.py` | 协议分流后包装 Socket，保证 FTCP 首包字节不丢失 |
+| `server/migrate_users.py` | `users.json` 明文密码一次性迁移至 `ftcp.db` |
+| `server/web/index.html` | 浏览器控制台 UI、理论日志、本地密码哈希 |
+| `client/tcp_client.py` | FTCP 客户端协议栈、分块传输、回调驱动 |
+| `client/client_ui.py` | CustomTkinter 图形界面、子线程网络 I/O |
+
 ---
 
 ## 技术要点
 
-- **多线程并发**：每个客户端连接独立 `threading.Thread`；协议分流亦在独立线程中处理
+- **多线程并发**：每个客户端连接独立 `threading.Thread`；`accept` 与协议分流亦在独立线程中处理
 - **身份验证**：文件操作前强制登录，SQLite `users` 表校验
 - **文件元数据**：`files_meta` 表记录 filename、uploader、upload_time、file_size
-- **分块缓存**：4096 字节 Buffer，支持任意二进制文件
+- **分块缓存**：4096 字节 Buffer，支持任意二进制文件（对应实验「发送缓存 / 接收缓存」要求）
 - **上传 ACK**：FTCP 上传后服务端发 `CMD_UPLOAD_ACK`，客户端确认成功
-- **GUI 不阻塞**：桌面客户端 Socket 在子线程，进度回调更新 UI
-- **Web 理论日志**：操作时自动输出 TCP/Socket/粘包/安全设计等实验要点
+- **GUI 不阻塞**：桌面客户端 Socket 在子线程，进度回调通过 `after(0, ...)` 更新 UI
+- **Web 理论日志**：操作时自动输出 TCP/Socket/粘包/安全设计等实验要点，便于撰写实验报告
+
+
 
 ---
 
@@ -324,6 +480,6 @@ cd server && python3 server.py
 | 下载/删除「文件不存在」 | 数据库无记录 | 先上传或刷新列表 |
 | 8082 端口被占用 | 旧进程未退出 / 其他程序占用 | Windows：`netstat -ano \| findstr :8082` 查 PID 后结束；或换端口 |
 | 服务器上无法运行 client_ui | 无 GUI | 在本机 Python 3.8+ 环境运行桌面端 |
-| `ModuleNotFoundError: customtkinter` | 未安装依赖 | `pip install customtkinter` |
+| `ModuleNotFoundError: customtkinter` | 未安装依赖 | `pip install -r client/requirements.txt` |
 | `database is locked` | 旧版全局连接 | 更新至最新 `database.py` 并重启 |
 | Web 主题切换无变化 | 浏览器缓存 | 强制刷新 `Ctrl+Shift+R` |
