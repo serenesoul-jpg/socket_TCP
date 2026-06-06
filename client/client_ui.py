@@ -2,407 +2,750 @@
 # -*- coding: utf-8 -*-
 """TCP 文件传输客户端 GUI：CustomTkinter 现代化界面，网络 I/O 运行于子线程。"""
 
-import os  # 导入 os 模块，处理文件路径
-import threading  # 导入 threading，配合 tcp_client 子线程机制
-import tkinter as tk  # 导入 tkinter，用于 messagebox 与 filedialog
-from tkinter import filedialog, messagebox  # 文件选择与弹窗组件
-from typing import Dict, List  # 类型注解
+import os
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from typing import Dict, List, Optional, Tuple
 
-import customtkinter as ctk  # 导入 CustomTkinter，构建现代化 UI
+import customtkinter as ctk
 
-from tcp_client import TcpFileClient  # 导入 TCP 通信核心类
+from tcp_client import TcpFileClient
+
+# 与 Web 控制台 business-light / business-dark 对齐的配色
+_PALETTE = {
+    "light": {
+        "bg": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface2": "#f8fafc",
+        "border": "#e2e8f0",
+        "text": "#0f172a",
+        "muted": "#64748b",
+        "primary": "#4f46e5",
+        "primary_hover": "#4338ca",
+        "primary_soft": "#eef2ff",
+        "success": "#059669",
+        "success_soft": "#ecfdf5",
+        "warn": "#d97706",
+        "warn_soft": "#fffbeb",
+        "danger": "#dc2626",
+        "danger_soft": "#fef2f2",
+        "row_hover": "#f8fafc",
+    },
+    "dark": {
+        "bg": "#0f172a",
+        "surface": "#1e293b",
+        "surface2": "#334155",
+        "border": "#334155",
+        "text": "#f1f5f9",
+        "muted": "#94a3b8",
+        "primary": "#818cf8",
+        "primary_hover": "#a5b4fc",
+        "primary_soft": "#312e81",
+        "success": "#34d399",
+        "success_soft": "#064e3b",
+        "warn": "#fbbf24",
+        "warn_soft": "#78350f",
+        "danger": "#f87171",
+        "danger_soft": "#7f1d1d",
+        "row_hover": "#334155",
+    },
+}
 
 
 class FileTransferApp(ctk.CTk):
-    """主窗口类：深色/浅色主题、连接配置、登录、文件列表、进度条与日志。"""
+    """主窗口：简约商务风布局，网络 I/O 在子线程执行。"""
 
     def __init__(self) -> None:
-        """初始化界面布局与 TCP 客户端回调绑定。"""
-        super().__init__()  # 调用 CTk 父类构造函数
+        super().__init__()
 
-        ctk.set_appearance_mode("light")  # 默认清新浅色，非深色科技风
-        ctk.set_default_color_theme("green")  # 默认绿色强调色，更自然
+        self._appearance = "light"
+        self._remote_files: List[Dict[str, int]] = []
+        self._selected_local: str = ""
+        self._selected_remote: str = ""
+        self._selected_remote_idx: Optional[int] = None
+        self._file_row_frames: List[ctk.CTkFrame] = []
 
-        self.title("TCP 文件传输客户端")  # 窗口标题
-        self.geometry("980x720")  # 初始窗口大小
-        self.minsize(860, 640)  # 最小尺寸，防止布局挤压
+        ctk.set_appearance_mode("light")
+        ctk.set_default_color_theme("blue")
 
-        self._remote_files: List[Dict[str, int]] = []  # 缓存远端文件列表
-        self._selected_local: str = ""  # 当前选中的本地文件路径
-        self._selected_remote: str = ""  # 当前选中的远端文件名
+        self.title("TCP 文件传输客户端")
+        self.geometry("1040x780")
+        self.minsize(920, 680)
 
-        # 创建 TCP 客户端，注册各类 UI 回调（回调内用 after 切回主线程）
         self.client = TcpFileClient(
-            on_log=self._append_log,  # 日志输出
-            on_progress=self._update_progress,  # 进度条更新
-            on_auth_result=self._on_auth_result,  # 登录结果弹窗
-            on_file_list=self._on_file_list,  # 刷新远端列表
-            on_transfer_done=self._on_transfer_done,  # 传输完成提示
-            on_error=self._on_error,  # 错误弹窗
+            on_log=self._append_log,
+            on_progress=self._update_progress,
+            on_auth_result=self._on_auth_result,
+            on_file_list=self._on_file_list,
+            on_transfer_done=self._on_transfer_done,
+            on_error=self._on_error,
         )
 
-        self._build_ui()  # 构建界面控件
+        self._build_ui()
+        self._apply_theme()
+
+    # ── 主题与样式 ──────────────────────────────────────────────
+
+    def _palette(self) -> Dict[str, str]:
+        return _PALETTE[self._appearance]
+
+    def _font_title(self) -> ctk.CTkFont:
+        return ctk.CTkFont(family="Microsoft YaHei UI", size=16, weight="bold")
+
+    def _font_section(self) -> ctk.CTkFont:
+        return ctk.CTkFont(family="Microsoft YaHei UI", size=13, weight="bold")
+
+    def _font_body(self) -> ctk.CTkFont:
+        return ctk.CTkFont(family="Microsoft YaHei UI", size=12)
+
+    def _font_mono(self) -> ctk.CTkFont:
+        return ctk.CTkFont(family="Consolas", size=11)
+
+    def _is_dark(self) -> bool:
+        if self._appearance == "dark":
+            return True
+        if self._appearance == "system":
+            return ctk.get_appearance_mode() == "Dark"
+        return False
+
+    def _apply_theme(self) -> None:
+        p = self._palette()
+        self.configure(fg_color=p["bg"])
+        for frame in (
+            self._header,
+            self._conn_card,
+            self._login_card,
+            self._file_card,
+            self._progress_card,
+            self._log_card,
+        ):
+            frame.configure(fg_color=p["surface"], border_color=p["border"])
+        self._brand_icon.configure(fg_color=p["primary"])
+        self._subtitle.configure(text_color=p["muted"])
+        self._local_drop.configure(
+            fg_color=p["surface2"],
+            border_color=p["border"],
+        )
+        self._refresh_file_row_styles()
+        self._update_status_badges()
 
     def _run_on_ui(self, func) -> None:
-        """将回调调度到 Tk 主线程执行，避免跨线程直接操作控件。"""
-        self.after(0, func)  # after(0) 在事件循环空闲时于主线程调用
+        self.after(0, func)
+
+    def _card(self, parent, row: int, *, pady: Tuple[int, int] = (0, 10)) -> ctk.CTkFrame:
+        p = self._palette()
+        card = ctk.CTkFrame(
+            parent,
+            corner_radius=14,
+            fg_color=p["surface"],
+            border_width=1,
+            border_color=p["border"],
+        )
+        card.grid(row=row, column=0, padx=20, pady=pady, sticky="nsew")
+        card.grid_columnconfigure(0, weight=1)
+        return card
+
+    def _section_title(self, parent, row: int, text: str, subtitle: str = "") -> None:
+        p = self._palette()
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.grid(row=row, column=0, padx=16, pady=(14, 8), sticky="ew")
+        ctk.CTkLabel(wrap, text=text, font=self._font_section(), text_color=p["text"]).pack(anchor="w")
+        if subtitle:
+            ctk.CTkLabel(
+                wrap, text=subtitle, font=self._font_body(), text_color=p["muted"]
+            ).pack(anchor="w", pady=(2, 0))
+
+    def _primary_btn(self, parent, text: str, command, width: int = 100) -> ctk.CTkButton:
+        p = self._palette()
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            height=34,
+            corner_radius=8,
+            font=self._font_body(),
+            fg_color=p["primary"],
+            hover_color=p["primary_hover"],
+        )
+
+    def _ghost_btn(self, parent, text: str, command, width: int = 100) -> ctk.CTkButton:
+        p = self._palette()
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            height=34,
+            corner_radius=8,
+            font=self._font_body(),
+            fg_color=p["surface2"],
+            hover_color=p["border"],
+            text_color=p["text"],
+            border_width=1,
+            border_color=p["border"],
+        )
+
+    def _danger_btn(self, parent, text: str, command, width: int = 100) -> ctk.CTkButton:
+        p = self._palette()
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            height=34,
+            corner_radius=8,
+            font=self._font_body(),
+            fg_color=p["danger"],
+            hover_color="#b91c1c",
+        )
+
+    # ── 界面构建 ──────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        """构建全部界面分区。"""
-        self.grid_columnconfigure(0, weight=1)  # 主列可伸缩
-        self.grid_rowconfigure(3, weight=1)  # 日志区可纵向扩展
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(5, weight=2)
 
-        # ---------- 顶部：连接配置区 ----------
-        conn_frame = ctk.CTkFrame(self, corner_radius=12)  # 圆角卡片容器
-        conn_frame.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")  # 网格布局
-        conn_frame.grid_columnconfigure(1, weight=1)  # IP 输入框可拉伸
+        self._build_header()
+        self._build_conn_card()
+        self._build_login_card()
+        self._build_file_card()
+        self._build_progress_card()
+        self._build_log_card()
 
-        ctk.CTkLabel(conn_frame, text="服务器 IP", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, padx=12, pady=12
-        )  # IP 标签
-        self.entry_host = ctk.CTkEntry(conn_frame, placeholder_text="例如 127.0.0.1 或公网 IP")  # IP 输入
-        self.entry_host.grid(row=0, column=1, padx=8, pady=12, sticky="ew")  # 放置输入框
-        self.entry_host.insert(0, "127.0.0.1")  # 默认本机地址
+        self._append_log("客户端已启动。请连接本机服务器 127.0.0.1:8082 并登录。")
 
-        ctk.CTkLabel(conn_frame, text="端口", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=2, padx=8, pady=12
-        )  # 端口标签
-        self.entry_port = ctk.CTkEntry(conn_frame, width=90, placeholder_text="8082")  # 端口输入
-        self.entry_port.grid(row=0, column=3, padx=8, pady=12)  # 放置端口框
-        self.entry_port.insert(0, "8082")  # 默认实验端口
+    def _build_header(self) -> None:
+        p = _PALETTE["light"]
+        self._header = ctk.CTkFrame(
+            self,
+            corner_radius=0,
+            fg_color=p["surface"],
+            border_width=0,
+            height=64,
+        )
+        self._header.grid(row=0, column=0, sticky="ew")
+        self._header.grid_columnconfigure(1, weight=1)
 
-        self.btn_connect = ctk.CTkButton(conn_frame, text="连接", command=self._on_connect, width=90)  # 连接按钮
-        self.btn_connect.grid(row=0, column=4, padx=8, pady=12)  # 放置连接按钮
-        self.btn_disconnect = ctk.CTkButton(
-            conn_frame, text="断开", command=self._on_disconnect, width=90, fg_color="#8B3A3A", hover_color="#6E2E2E"
-        )  # 断开按钮（红色系）
-        self.btn_disconnect.grid(row=0, column=5, padx=(0, 12), pady=12)  # 放置断开按钮
+        brand = ctk.CTkFrame(self._header, fg_color="transparent")
+        brand.grid(row=0, column=0, padx=20, pady=12, sticky="w")
 
-        # 界面风格预设（外观模式 + 强调色）
+        self._brand_icon = ctk.CTkLabel(
+            brand,
+            text="FT",
+            width=40,
+            height=40,
+            corner_radius=10,
+            fg_color=p["primary"],
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self._brand_icon.pack(side="left")
+
+        title_wrap = ctk.CTkFrame(brand, fg_color="transparent")
+        title_wrap.pack(side="left", padx=(12, 0))
+        ctk.CTkLabel(
+            title_wrap,
+            text="TCP 文件传输客户端",
+            font=self._font_title(),
+            text_color=p["text"],
+        ).pack(anchor="w")
+        self._subtitle = ctk.CTkLabel(
+            title_wrap,
+            text="FTCP 协议 · 本机实验复现",
+            font=self._font_body(),
+            text_color=p["muted"],
+        )
+        self._subtitle.pack(anchor="w")
+
+        actions = ctk.CTkFrame(self._header, fg_color="transparent")
+        actions.grid(row=0, column=2, padx=20, pady=12, sticky="e")
+
+        self._lbl_conn_status = ctk.CTkLabel(
+            actions,
+            text="● 未连接",
+            font=self._font_body(),
+            text_color=p["muted"],
+        )
+        self._lbl_conn_status.pack(side="left", padx=(0, 16))
+
         self._ui_styles = {
-            "清新浅色-绿（默认）": ("light", "green"),
-            "清新浅色-蓝": ("light", "blue"),
-            "暖色深色-蓝": ("dark", "dark-blue"),
-            "深色-绿": ("dark", "green"),
-            "跟随系统-蓝": ("system", "blue"),
+            "简约浅色": "light",
+            "简约深色": "dark",
+            "跟随系统": "system",
         }
-        style_menu = ctk.CTkOptionMenu(
-            conn_frame,
+        self._style_menu = ctk.CTkOptionMenu(
+            actions,
             values=list(self._ui_styles.keys()),
             command=self._on_ui_style_change,
-            width=160,
-        )  # 界面风格下拉菜单
-        style_menu.grid(row=0, column=6, padx=(0, 12), pady=12)  # 放置风格菜单
-        style_menu.set("清新浅色-绿（默认）")  # 默认风格
+            width=120,
+            height=32,
+            corner_radius=8,
+            font=self._font_body(),
+        )
+        self._style_menu.pack(side="left")
+        self._style_menu.set("简约浅色")
 
-        # ---------- 登录面板 ----------
-        login_frame = ctk.CTkFrame(self, corner_radius=12)  # 登录区容器
-        login_frame.grid(row=1, column=0, padx=16, pady=8, sticky="ew")  # 第二行
-        login_frame.grid_columnconfigure(1, weight=1)  # 用户名框可拉伸
+    def _build_conn_card(self) -> None:
+        self._conn_card = self._card(self, 1, pady=(12, 8))
+        self._section_title(self._conn_card, 0, "连接设置", "填写服务器地址后点击连接")
 
-        ctk.CTkLabel(login_frame, text="用户登录", font=ctk.CTkFont(size=15, weight="bold")).grid(
-            row=0, column=0, columnspan=6, padx=12, pady=(12, 4), sticky="w"
-        )  # 登录标题
+        row = ctk.CTkFrame(self._conn_card, fg_color="transparent")
+        row.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="ew")
+        row.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(login_frame, text="用户名").grid(row=1, column=0, padx=12, pady=8)  # 用户名标签
-        self.entry_user = ctk.CTkEntry(login_frame, placeholder_text="admin")  # 用户名输入
-        self.entry_user.grid(row=1, column=1, padx=8, pady=8, sticky="ew")  # 放置
+        ctk.CTkLabel(row, text="服务器 IP", font=self._font_body()).grid(row=0, column=0, padx=(0, 8))
+        self.entry_host = ctk.CTkEntry(
+            row, placeholder_text="127.0.0.1", height=34, corner_radius=8, font=self._font_body()
+        )
+        self.entry_host.grid(row=0, column=1, padx=4, sticky="ew")
+        self.entry_host.insert(0, "127.0.0.1")
 
-        ctk.CTkLabel(login_frame, text="密码").grid(row=1, column=2, padx=8, pady=8)  # 密码标签
-        self.entry_pass = ctk.CTkEntry(login_frame, placeholder_text="admin123", show="*")  # 密码掩码输入
-        self.entry_pass.grid(row=1, column=3, padx=8, pady=8, sticky="ew")  # 放置
+        ctk.CTkLabel(row, text="端口", font=self._font_body()).grid(row=0, column=2, padx=(12, 8))
+        self.entry_port = ctk.CTkEntry(row, width=80, height=34, corner_radius=8, font=self._font_body())
+        self.entry_port.grid(row=0, column=3, padx=4)
+        self.entry_port.insert(0, "8082")
 
-        self.btn_login = ctk.CTkButton(login_frame, text="登录验证", command=self._on_login, width=110)  # 登录按钮
-        self.btn_login.grid(row=1, column=4, padx=8, pady=8)  # 放置
+        self.btn_connect = self._primary_btn(row, "连接", self._on_connect, 88)
+        self.btn_connect.grid(row=0, column=4, padx=(12, 4))
+        self.btn_disconnect = self._danger_btn(row, "断开", self._on_disconnect, 88)
+        self.btn_disconnect.grid(row=0, column=5, padx=4)
 
-        self.lbl_auth = ctk.CTkLabel(login_frame, text="状态: 未登录", text_color="#FFAA00")  # 登录状态标签
-        self.lbl_auth.grid(row=1, column=5, padx=(0, 12), pady=8)  # 放置状态
+    def _build_login_card(self) -> None:
+        self._login_card = self._card(self, 2, pady=8)
+        self._section_title(self._login_card, 0, "身份验证", "登录后方可上传、下载与删除文件")
 
-        # ---------- 中部：文件操作区 ----------
-        file_frame = ctk.CTkFrame(self, corner_radius=12)  # 文件操作容器
-        file_frame.grid(row=2, column=0, padx=16, pady=8, sticky="nsew")  # 第三行
-        file_frame.grid_columnconfigure(0, weight=1)  # 左列伸缩
-        file_frame.grid_columnconfigure(1, weight=1)  # 右列伸缩
-        file_frame.grid_rowconfigure(1, weight=1)  # 列表区伸缩
+        row = ctk.CTkFrame(self._login_card, fg_color="transparent")
+        row.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="ew")
+        row.grid_columnconfigure(1, weight=1)
+        row.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(file_frame, text="远端文件列表", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, padx=12, pady=(12, 4), sticky="w"
-        )  # 远端列表标题
-        ctk.CTkLabel(file_frame, text="本地文件选择", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=1, padx=12, pady=(12, 4), sticky="w"
-        )  # 本地选择标题
+        ctk.CTkLabel(row, text="用户名", font=self._font_body()).grid(row=0, column=0, padx=(0, 8))
+        self.entry_user = ctk.CTkEntry(
+            row, placeholder_text="admin", height=34, corner_radius=8, font=self._font_body()
+        )
+        self.entry_user.grid(row=0, column=1, padx=4, sticky="ew")
 
-        self.list_remote = tk.Listbox(
-            file_frame,
-            height=10,
-            bg="#F0F0F0",
-            fg="#1A1A1A",
-            selectbackground="#2FA572",
-            borderwidth=0,
-            highlightthickness=1,
-        )  # 远端文件 Listbox（浅色默认配色）
-        self.list_remote.grid(row=1, column=0, padx=12, pady=8, sticky="nsew")  # 放置列表
-        self.list_remote.bind("<<ListboxSelect>>", self._on_remote_select)  # 选中事件
+        ctk.CTkLabel(row, text="密码", font=self._font_body()).grid(row=0, column=2, padx=(12, 8))
+        self.entry_pass = ctk.CTkEntry(
+            row, placeholder_text="admin123", show="*", height=34, corner_radius=8, font=self._font_body()
+        )
+        self.entry_pass.grid(row=0, column=3, padx=4, sticky="ew")
 
-        local_panel = ctk.CTkFrame(file_frame, fg_color="transparent")  # 本地文件面板
-        local_panel.grid(row=1, column=1, padx=12, pady=8, sticky="nsew")  # 右列
-        local_panel.grid_columnconfigure(0, weight=1)  # 路径框可拉伸
+        self.btn_login = self._primary_btn(row, "登录", self._on_login, 88)
+        self.btn_login.grid(row=0, column=4, padx=(12, 8))
 
+        self.lbl_auth = ctk.CTkLabel(
+            row,
+            text="未登录",
+            font=self._font_body(),
+            text_color=_PALETTE["light"]["warn"],
+            fg_color=_PALETTE["light"]["warn_soft"],
+            corner_radius=16,
+            width=88,
+            height=30,
+        )
+        self.lbl_auth.grid(row=0, column=5, padx=4)
+
+    def _build_file_card(self) -> None:
+        self._file_card = self._card(self, 3, pady=8)
+        self._file_card.grid_rowconfigure(1, weight=1)
+        self._file_card.grid_columnconfigure(0, weight=1)
+        self._file_card.grid_columnconfigure(1, weight=1)
+
+        headers = ctk.CTkFrame(self._file_card, fg_color="transparent")
+        headers.grid(row=0, column=0, columnspan=2, padx=16, pady=(14, 6), sticky="ew")
+        headers.grid_columnconfigure(0, weight=1)
+        headers.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(headers, text="远端文件", font=self._font_section()).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(headers, text="本地文件", font=self._font_section()).grid(row=0, column=1, sticky="w", padx=(12, 0))
+
+        self._remote_scroll = ctk.CTkScrollableFrame(
+            self._file_card,
+            height=220,
+            corner_radius=10,
+            fg_color=_PALETTE["light"]["surface2"],
+            border_width=1,
+            border_color=_PALETTE["light"]["border"],
+        )
+        self._remote_scroll.grid(row=1, column=0, padx=(16, 8), pady=4, sticky="nsew")
+        self._remote_scroll.grid_columnconfigure(0, weight=1)
+
+        self._remote_empty = ctk.CTkLabel(
+            self._remote_scroll,
+            text="登录后点击「刷新列表」加载文件",
+            font=self._font_body(),
+            text_color=_PALETTE["light"]["muted"],
+        )
+        self._remote_empty.grid(row=0, column=0, pady=40)
+
+        local_wrap = ctk.CTkFrame(self._file_card, fg_color="transparent")
+        local_wrap.grid(row=1, column=1, padx=(8, 16), pady=4, sticky="nsew")
+        local_wrap.grid_rowconfigure(0, weight=1)
+        local_wrap.grid_columnconfigure(0, weight=1)
+
+        self._local_drop = ctk.CTkFrame(
+            local_wrap,
+            corner_radius=10,
+            fg_color=_PALETTE["light"]["surface2"],
+            border_width=1,
+            border_color=_PALETTE["light"]["border"],
+        )
+        self._local_drop.grid(row=0, column=0, sticky="nsew")
+        self._local_drop.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self._local_drop,
+            text="📁",
+            font=ctk.CTkFont(size=28),
+        ).grid(row=0, column=0, pady=(28, 4))
         self.lbl_local = ctk.CTkLabel(
-            local_panel, text="未选择本地文件", wraplength=360, justify="left"
-        )  # 显示已选本地路径
-        self.lbl_local.grid(row=0, column=0, columnspan=2, padx=4, pady=8, sticky="ew")  # 放置
+            self._local_drop,
+            text="点击选择要上传的本地文件",
+            font=self._font_body(),
+            text_color=_PALETTE["light"]["muted"],
+            wraplength=320,
+            justify="center",
+        )
+        self.lbl_local.grid(row=1, column=0, padx=16, pady=4)
+        ctk.CTkButton(
+            self._local_drop,
+            text="浏览本地文件",
+            command=self._on_browse_local,
+            height=32,
+            corner_radius=8,
+            font=self._font_body(),
+            fg_color=_PALETTE["light"]["primary"],
+            hover_color=_PALETTE["light"]["primary_hover"],
+        ).grid(row=2, column=0, pady=(8, 24))
 
-        ctk.CTkButton(local_panel, text="浏览本地文件...", command=self._on_browse_local).grid(
-            row=1, column=0, padx=4, pady=4, sticky="w"
-        )  # 本地文件选择按钮
+        btn_row = ctk.CTkFrame(self._file_card, fg_color="transparent")
+        btn_row.grid(row=2, column=0, columnspan=2, padx=16, pady=(8, 14), sticky="ew")
 
-        btn_row = ctk.CTkFrame(file_frame, fg_color="transparent")  # 操作按钮行
-        btn_row.grid(row=2, column=0, columnspan=2, padx=12, pady=(4, 8), sticky="ew")  # 底部
-
-        self.btn_refresh = ctk.CTkButton(btn_row, text="刷新远端列表", command=self._on_refresh_list, width=130)  # 刷新
-        self.btn_refresh.grid(row=0, column=0, padx=4, pady=4)  # 放置
-
-        self.btn_upload = ctk.CTkButton(
-            btn_row, text="上传文件", command=self._on_upload, width=120, fg_color="#1A7F4B", hover_color="#14663C"
-        )  # 上传按钮
-        self.btn_upload.grid(row=0, column=1, padx=4, pady=4)  # 放置
-
+        self.btn_refresh = self._ghost_btn(btn_row, "↻ 刷新列表", self._on_refresh_list, 120)
+        self.btn_refresh.pack(side="left", padx=(0, 8))
+        self.btn_upload = self._primary_btn(btn_row, "↑ 上传", self._on_upload, 100)
+        self.btn_upload.pack(side="left", padx=4)
         self.btn_download = ctk.CTkButton(
-            btn_row, text="下载文件", command=self._on_download, width=120, fg_color="#1F6AA5", hover_color="#185580"
-        )  # 下载按钮
-        self.btn_download.grid(row=0, column=2, padx=4, pady=4)  # 放置
+            btn_row,
+            text="↓ 下载",
+            command=self._on_download,
+            width=100,
+            height=34,
+            corner_radius=8,
+            font=self._font_body(),
+            fg_color="#0ea5e9",
+            hover_color="#0284c7",
+        )
+        self.btn_download.pack(side="left", padx=4)
+        self.btn_delete = self._danger_btn(btn_row, "删除", self._on_delete, 88)
+        self.btn_delete.pack(side="left", padx=4)
 
-        self.btn_delete = ctk.CTkButton(
-            btn_row, text="删除文件", command=self._on_delete, width=120, fg_color="#B91C1C", hover_color="#991B1B"
-        )  # 删除远端文件按钮
-        self.btn_delete.grid(row=0, column=3, padx=4, pady=4)  # 放置
+    def _build_progress_card(self) -> None:
+        self._progress_card = self._card(self, 4, pady=8)
+        self._section_title(self._progress_card, 0, "传输进度")
 
-        # ---------- 进度条 ----------
-        progress_frame = ctk.CTkFrame(self, corner_radius=12)  # 进度区
-        progress_frame.grid(row=3, column=0, padx=16, pady=8, sticky="ew")  # 第四行
-        progress_frame.grid_columnconfigure(0, weight=1)  # 进度条可拉伸
+        self.lbl_progress = ctk.CTkLabel(
+            self._progress_card,
+            text="等待传输任务…",
+            font=self._font_body(),
+            text_color=_PALETTE["light"]["muted"],
+        )
+        self.lbl_progress.grid(row=1, column=0, padx=16, pady=(0, 6), sticky="w")
 
-        self.lbl_progress = ctk.CTkLabel(progress_frame, text="传输进度: 0.0%")  # 百分比文字
-        self.lbl_progress.grid(row=0, column=0, padx=12, pady=(12, 4), sticky="w")  # 放置
+        self.progress_bar = ctk.CTkProgressBar(
+            self._progress_card,
+            height=10,
+            corner_radius=5,
+            progress_color=_PALETTE["light"]["primary"],
+        )
+        self.progress_bar.grid(row=2, column=0, padx=16, pady=(0, 14), sticky="ew")
+        self.progress_bar.set(0)
 
-        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=18)  # 进度条控件
-        self.progress_bar.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")  # 放置
-        self.progress_bar.set(0)  # 初始 0%
+    def _build_log_card(self) -> None:
+        self._log_card = self._card(self, 5, pady=(8, 16))
+        self._log_card.grid_rowconfigure(1, weight=1)
+        self._section_title(self._log_card, 0, "运行日志", "记录连接、登录与传输操作")
 
-        # ---------- 日志控制台 ----------
-        log_frame = ctk.CTkFrame(self, corner_radius=12)  # 日志区容器
-        log_frame.grid(row=4, column=0, padx=16, pady=(8, 16), sticky="nsew")  # 第五行
-        log_frame.grid_columnconfigure(0, weight=1)  # 文本框可拉伸
-        log_frame.grid_rowconfigure(1, weight=1)  # 日志文本可纵向扩展
-        self.grid_rowconfigure(4, weight=2)  # 主窗口给日志更多空间
+        self.txt_log = ctk.CTkTextbox(
+            self._log_card,
+            height=140,
+            font=self._font_mono(),
+            corner_radius=10,
+            fg_color=_PALETTE["light"]["surface2"],
+            border_width=1,
+            border_color=_PALETTE["light"]["border"],
+        )
+        self.txt_log.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="nsew")
+        self.txt_log.configure(state="disabled")
 
-        ctk.CTkLabel(log_frame, text="运行日志", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, padx=12, pady=(12, 4), sticky="w"
-        )  # 日志标题
+    # ── 文件列表（可点击行） ────────────────────────────────────
 
-        self.txt_log = ctk.CTkTextbox(log_frame, height=160, font=ctk.CTkFont(family="Consolas", size=12))  # 日志文本框
-        self.txt_log.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")  # 放置
-        self.txt_log.configure(state="disabled")  # 默认只读
+    def _clear_remote_list(self) -> None:
+        for row in self._file_row_frames:
+            row.destroy()
+        self._file_row_frames.clear()
+        self._selected_remote_idx = None
+        self._selected_remote = ""
 
-        self._append_log("客户端已启动，请先连接服务器并登录。")  # 初始日志
+    def _refresh_file_row_styles(self) -> None:
+        p = self._palette()
+        self._remote_scroll.configure(fg_color=p["surface2"], border_color=p["border"])
+        for idx, row in enumerate(self._file_row_frames):
+            selected = idx == self._selected_remote_idx
+            row.configure(fg_color=p["primary_soft"] if selected else "transparent")
+            for child in row.winfo_children():
+                if isinstance(child, ctk.CTkLabel):
+                    child.configure(
+                        text_color=p["primary"] if selected else p["text"],
+                    )
+
+    def _select_remote_idx(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self._remote_files):
+            return
+        self._selected_remote_idx = idx
+        self._selected_remote = self._remote_files[idx]["name"]
+        self._refresh_file_row_styles()
+
+    def _render_remote_files(self, files: List[Dict[str, int]]) -> None:
+        self._clear_remote_list()
+        self._remote_empty.grid_remove()
+
+        if not files:
+            self._remote_empty.configure(text="远端暂无文件")
+            self._remote_empty.grid()
+            return
+
+        p = self._palette()
+        for idx, item in enumerate(files):
+            name = item["name"]
+            size_kb = item["size"] / 1024.0
+
+            row = ctk.CTkFrame(self._remote_scroll, fg_color="transparent", corner_radius=8, height=40)
+            row.grid(row=idx, column=0, sticky="ew", pady=2)
+            row.grid_columnconfigure(1, weight=1)
+            self._file_row_frames.append(row)
+
+            icon = "📄" if size_kb < 1024 else "📦"
+            ctk.CTkLabel(row, text=icon, width=28, font=self._font_body()).grid(row=0, column=0, padx=(8, 4))
+            ctk.CTkLabel(
+                row,
+                text=name,
+                font=self._font_body(),
+                anchor="w",
+                text_color=p["text"],
+            ).grid(row=0, column=1, sticky="ew")
+            ctk.CTkLabel(
+                row,
+                text=f"{size_kb:.1f} KB",
+                font=self._font_body(),
+                text_color=p["muted"],
+            ).grid(row=0, column=2, padx=(4, 10))
+
+            def bind_click(widget, i=idx):
+                widget.bind("<Button-1>", lambda _e, j=i: self._select_remote_idx(j))
+
+            bind_click(row)
+            for child in row.winfo_children():
+                bind_click(child)
+
+        self._refresh_file_row_styles()
+
+    # ── 状态徽章 ──────────────────────────────────────────────
+
+    def _update_status_badges(self) -> None:
+        p = self._palette()
+        if self.client.is_connected:
+            self._lbl_conn_status.configure(text="● 已连接", text_color=p["success"])
+        else:
+            self._lbl_conn_status.configure(text="● 未连接", text_color=p["muted"])
+
+        if self.client.is_logged_in:
+            self.lbl_auth.configure(
+                text="已登录",
+                text_color=p["success"],
+                fg_color=p["success_soft"],
+            )
+        else:
+            self.lbl_auth.configure(
+                text="未登录",
+                text_color=p["warn"],
+                fg_color=p["warn_soft"],
+            )
 
     def _on_ui_style_change(self, style_name: str) -> None:
-        """切换界面风格预设（浅色/深色 + 强调色）。"""
-        appearance, color = self._ui_styles.get(style_name, ("light", "green"))  # 查预设
-        ctk.set_appearance_mode(appearance)  # 切换浅/深/系统外观
-        ctk.set_default_color_theme(color)  # 切换蓝/绿/深蓝强调色
-        dark = appearance == "dark" or (
-            appearance == "system" and ctk.get_appearance_mode() == "Dark"
-        )  # 判断是否深色
-        self.list_remote.configure(
-            bg="#2B2B2B" if dark else "#F0F0F0",
-            fg="#FFFFFF" if dark else "#1A1A1A",
-            selectbackground="#2FA572" if color == "green" else "#1F6AA5",
-        )  # 同步 Listbox 与风格一致
-        self._append_log(f"已切换界面风格：{style_name}")  # 记录风格变更
+        mode = self._ui_styles.get(style_name, "light")
+        self._appearance = "light" if mode == "light" else ("dark" if mode == "dark" else "system")
+        ctk.set_appearance_mode(mode)
+        self._apply_theme()
+        self._append_log(f"已切换主题：{style_name}")
 
     def _on_theme_change(self, mode: str) -> None:
-        """兼容旧接口：切换深色/浅色/跟随系统主题。"""
-        ctk.set_appearance_mode(mode)  # 应用主题
-        dark = mode == "dark" or (mode == "system" and ctk.get_appearance_mode() == "Dark")  # 判断是否深色
-        self.list_remote.configure(
-            bg="#2B2B2B" if dark else "#F0F0F0", fg="#FFFFFF" if dark else "#1A1A1A"
-        )  # 同步 Listbox 配色
+        self._appearance = mode
+        ctk.set_appearance_mode(mode)
+        self._apply_theme()
+
+    # ── 日志与进度 ──────────────────────────────────────────────
 
     def _append_log(self, message: str) -> None:
-        """线程安全地向日志区追加一行文本。"""
-
         def _write() -> None:
-            self.txt_log.configure(state="normal")  # 临时允许写入
-            self.txt_log.insert("end", message + "\n")  # 追加日志行
-            self.txt_log.see("end")  # 滚动到底部
-            self.txt_log.configure(state="disabled")  # 恢复只读
+            self.txt_log.configure(state="normal")
+            self.txt_log.insert("end", message + "\n")
+            self.txt_log.see("end")
+            self.txt_log.configure(state="disabled")
 
-        if threading.current_thread() is threading.main_thread():  # 已在主线程
-            _write()  # 直接写
-        else:  # 在子线程回调中
-            self._run_on_ui(_write)  # 调度到主线程
+        if threading.current_thread() is threading.main_thread():
+            _write()
+        else:
+            self._run_on_ui(_write)
 
     def _update_progress(self, percent: float, desc: str) -> None:
-        """更新进度条与百分比标签（线程安全）。"""
-
         def _ui() -> None:
-            value = max(0.0, min(1.0, percent / 100.0))  # CTk 进度条取值 0~1
-            self.progress_bar.set(value)  # 设置进度条
-            self.lbl_progress.configure(text=f"传输进度: {percent:.1f}%  |  {desc}")  # 更新文字
+            value = max(0.0, min(1.0, percent / 100.0))
+            self.progress_bar.set(value)
+            p = self._palette()
+            self.lbl_progress.configure(
+                text=f"{percent:.1f}%  ·  {desc}",
+                text_color=p["text"] if percent > 0 else p["muted"],
+            )
 
-        self._run_on_ui(_ui)  # 主线程更新 UI
+        self._run_on_ui(_ui)
+
+    # ── 客户端回调 ──────────────────────────────────────────────
 
     def _on_auth_result(self, success: bool, message: str) -> None:
-        """登录结果：成功更新状态，失败弹窗提示。"""
-
         def _ui() -> None:
-            if success:  # 登录成功
-                self.lbl_auth.configure(text="状态: 已登录", text_color="#4CD964")  # 绿色状态
-                messagebox.showinfo("登录成功", message)  # 成功提示框
-            else:  # 登录失败
-                self.lbl_auth.configure(text="状态: 未登录", text_color="#FF453A")  # 红色状态
-                messagebox.showerror("登录失败", message)  # 错误弹窗（用户名错误/密码错误）
+            self._update_status_badges()
+            if success:
+                messagebox.showinfo("登录成功", message)
+            else:
+                messagebox.showerror("登录失败", message)
 
-        self._run_on_ui(_ui)  # 主线程弹窗
+        self._run_on_ui(_ui)
 
     def _on_file_list(self, files: List[Dict[str, int]]) -> None:
-        """刷新远端文件 Listbox。"""
-
         def _ui() -> None:
-            self._remote_files = files  # 缓存列表数据
-            self.list_remote.delete(0, "end")  # 清空 Listbox
-            for item in files:  # 遍历文件
-                size_kb = item["size"] / 1024.0  # 字节转 KB 显示
-                line = f"{item['name']}  ({size_kb:.1f} KB)"  # 格式化行
-                self.list_remote.insert("end", line)  # 插入一行
+            self._remote_files = files
+            self._render_remote_files(files)
 
-        self._run_on_ui(_ui)  # 主线程刷新
+        self._run_on_ui(_ui)
 
     def _on_transfer_done(self, message: str) -> None:
-        """传输完成后的 UI 反馈。"""
-
         def _ui() -> None:
-            messagebox.showinfo("传输完成", message)  # 完成弹窗
-            if self.client.is_logged_in:  # 若仍在线则自动刷新列表
-                self._on_refresh_list()  # 刷新远端文件
+            messagebox.showinfo("传输完成", message)
+            if self.client.is_logged_in:
+                self._on_refresh_list()
 
-        self._run_on_ui(_ui)  # 主线程执行
+        self._run_on_ui(_ui)
 
     def _on_error(self, message: str) -> None:
-        """网络错误弹窗。"""
-
         def _ui() -> None:
-            messagebox.showerror("操作错误", message)  # 错误弹窗
+            messagebox.showerror("操作错误", message)
 
-        self._run_on_ui(_ui)  # 主线程弹窗
+        self._run_on_ui(_ui)
+
+    # ── 用户操作 ──────────────────────────────────────────────
 
     def _get_host_port(self) -> tuple:
-        """从输入框解析 IP 与端口。"""
-        host = self.entry_host.get().strip()  # 读取 IP
-        port_str = self.entry_port.get().strip()  # 读取端口字符串
-        if not host:  # IP 不能为空
-            raise ValueError("请输入服务器 IP")  # 校验
+        host = self.entry_host.get().strip()
+        port_str = self.entry_port.get().strip()
+        if not host:
+            raise ValueError("请输入服务器 IP")
         try:
-            port = int(port_str)  # 端口转整数
+            port = int(port_str)
         except ValueError as exc:
-            raise ValueError("端口必须是数字") from exc  # 端口格式错误
-        return host, port  # 返回元组
+            raise ValueError("端口必须是数字") from exc
+        return host, port
 
     def _on_connect(self) -> None:
-        """连接按钮：子线程执行 connect，不阻塞 GUI。"""
         try:
-            host, port = self._get_host_port()  # 解析配置
+            host, port = self._get_host_port()
         except ValueError as exc:
-            messagebox.showwarning("输入错误", str(exc))  # 弹窗提示
-            return  # 终止
+            messagebox.showwarning("输入错误", str(exc))
+            return
 
-        self.client.run_in_thread(lambda: self.client.connect(host, port), "连接")  # 子线程连接
+        def _task() -> None:
+            self.client.connect(host, port)
+            self._run_on_ui(self._update_status_badges)
+
+        self.client.run_in_thread(_task, "连接")
 
     def _on_disconnect(self) -> None:
-        """断开连接。"""
-        self.client.run_in_thread(self.client.disconnect, "断开")  # 子线程断开
-        self.lbl_auth.configure(text="状态: 未登录", text_color="#FFAA00")  # 重置状态
+        self.client.run_in_thread(self.client.disconnect, "断开")
+        self._update_status_badges()
 
     def _on_login(self) -> None:
-        """登录按钮：必须先连接，再在子线程验证。"""
-        if not self.client.is_connected:  # 未连接
-            messagebox.showwarning("提示", "请先连接服务器")  # 警告
-            return  # 终止
-        username = self.entry_user.get().strip()  # 读取用户名
-        password = self.entry_pass.get()  # 读取密码
-        if not username or not password:  # 非空校验
-            messagebox.showwarning("提示", "请输入用户名和密码")  # 警告
-            return  # 终止
-        self.client.run_in_thread(lambda: self.client.login(username, password), "登录")  # 子线程登录
+        if not self.client.is_connected:
+            messagebox.showwarning("提示", "请先连接服务器")
+            return
+        username = self.entry_user.get().strip()
+        password = self.entry_pass.get()
+        if not username or not password:
+            messagebox.showwarning("提示", "请输入用户名和密码")
+            return
+        self.client.run_in_thread(lambda: self.client.login(username, password), "登录")
 
     def _on_refresh_list(self) -> None:
-        """刷新远端文件列表（需已登录）。"""
-        if not self.client.is_logged_in:  # 未登录
-            messagebox.showwarning("提示", "请先登录后再查看远端文件列表")  # 警告
-            return  # 终止
-        self.client.run_in_thread(self.client.list_files, "获取文件列表")  # 子线程请求列表
+        if not self.client.is_logged_in:
+            messagebox.showwarning("提示", "请先登录后再查看远端文件列表")
+            return
+        self.client.run_in_thread(self.client.list_files, "获取文件列表")
 
     def _on_browse_local(self) -> None:
-        """打开本地文件选择对话框。"""
-        path = filedialog.askopenfilename(title="选择要上传的文件")  # 系统文件对话框
-        if path:  # 用户选择了文件
-            self._selected_local = path  # 保存路径
-            self.lbl_local.configure(text=f"已选: {path}")  # 更新标签
+        path = filedialog.askopenfilename(title="选择要上传的文件")
+        if path:
+            self._selected_local = path
+            name = os.path.basename(path)
+            size_kb = os.path.getsize(path) / 1024.0
+            p = self._palette()
+            self.lbl_local.configure(
+                text=f"{name}\n{size_kb:.1f} KB",
+                text_color=p["text"],
+            )
 
     def _on_remote_select(self, _event=None) -> None:
-        """Listbox 选中项时记录远端文件名。"""
-        sel = self.list_remote.curselection()  # 获取选中索引
-        if not sel:  # 无选中
-            return  # 忽略
-        idx = sel[0]  # 第一个选中索引
-        if 0 <= idx < len(self._remote_files):  # 边界检查
-            self._selected_remote = self._remote_files[idx]["name"]  # 记录文件名
+        pass  # 已由 _select_remote_idx 处理
 
     def _on_upload(self) -> None:
-        """上传：强制登录校验后在子线程传输。"""
-        if not self.client.is_logged_in:  # 未登录禁止上传
-            messagebox.showwarning("需要登录", "请先登录后再上传文件")  # 弹窗
-            return  # 终止
-        if not self._selected_local:  # 未选本地文件
-            messagebox.showwarning("提示", "请先选择要上传的本地文件")  # 警告
-            return  # 终止
-        path = self._selected_local  # 捕获路径供闭包使用
-        self.progress_bar.set(0)  # 重置进度条
-        self.client.run_in_thread(lambda: self.client.upload_file(path), "上传")  # 子线程上传
+        if not self.client.is_logged_in:
+            messagebox.showwarning("需要登录", "请先登录后再上传文件")
+            return
+        if not self._selected_local:
+            messagebox.showwarning("提示", "请先选择要上传的本地文件")
+            return
+        path = self._selected_local
+        self.progress_bar.set(0)
+        self.client.run_in_thread(lambda: self.client.upload_file(path), "上传")
 
     def _on_download(self) -> None:
-        """下载：强制登录校验后在子线程传输。"""
-        if not self.client.is_logged_in:  # 未登录禁止下载
-            messagebox.showwarning("需要登录", "请先登录后再下载文件")  # 弹窗
-            return  # 终止
-        if not self._selected_remote:  # 未选远端文件
-            messagebox.showwarning("提示", "请先在远端列表中选择要下载的文件")  # 警告
-            return  # 终止
-        name = self._selected_remote  # 捕获文件名
-        self.progress_bar.set(0)  # 重置进度条
-        self.client.run_in_thread(lambda: self.client.download_file(name), "下载")  # 子线程下载
+        if not self.client.is_logged_in:
+            messagebox.showwarning("需要登录", "请先登录后再下载文件")
+            return
+        if not self._selected_remote:
+            messagebox.showwarning("提示", "请先在远端列表中选择要下载的文件")
+            return
+        name = self._selected_remote
+        self.progress_bar.set(0)
+        self.client.run_in_thread(lambda: self.client.download_file(name), "下载")
 
     def _on_delete(self) -> None:
-        """删除：强制登录校验后在子线程请求服务器删除远端文件。"""
-        if not self.client.is_logged_in:  # 未登录禁止删除
-            messagebox.showwarning("需要登录", "请先登录后再删除文件")  # 弹窗
-            return  # 终止
-        if not self._selected_remote:  # 未选远端文件
-            messagebox.showwarning("提示", "请先在远端列表中选择要删除的文件")  # 警告
-            return  # 终止
-        name = self._selected_remote  # 捕获文件名
-        if not messagebox.askyesno("确认删除", f"确定要删除服务器上的文件吗？\n\n{name}"):  # 二次确认
-            return  # 用户取消
-        self.client.run_in_thread(lambda: self.client.delete_file(name), "删除")  # 子线程删除
+        if not self.client.is_logged_in:
+            messagebox.showwarning("需要登录", "请先登录后再删除文件")
+            return
+        if not self._selected_remote:
+            messagebox.showwarning("提示", "请先在远端列表中选择要删除的文件")
+            return
+        name = self._selected_remote
+        if not messagebox.askyesno("确认删除", f"确定要删除服务器上的文件吗？\n\n{name}"):
+            return
+        self.client.run_in_thread(lambda: self.client.delete_file(name), "删除")
 
 
 def main() -> None:
-    """程序入口。"""
-    app = FileTransferApp()  # 创建主窗口
-    app.mainloop()  # 进入 Tk 事件循环（GUI 主线程）
+    app = FileTransferApp()
+    app.mainloop()
 
 
-if __name__ == "__main__":  # 直接运行本脚本
-    main()  # 启动客户端
+if __name__ == "__main__":
+    main()

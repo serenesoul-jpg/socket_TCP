@@ -366,7 +366,12 @@ def main() -> None:
     try:
         while True:  # 主循环：接受新连接
             client_conn, client_addr = server_sock.accept()  # 阻塞等待客户端连接
-            dispatch_connection(client_conn, client_addr)  # 按协议分流到 HTTP 或 FTCP
+            # 独立线程分流：避免 peek 等待首包时阻塞 accept，导致桌面端连接后无法登录
+            threading.Thread(
+                target=dispatch_connection,
+                args=(client_conn, client_addr),
+                daemon=True,
+            ).start()
     except KeyboardInterrupt:  # Ctrl+C 优雅退出
         print("\n服务器正在关闭...")  # 提示正在关闭
     finally:
