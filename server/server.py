@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """TCP 文件传输服务器：多线程并发、身份验证、分块文件读写。"""
 
-import json  # 导入 json 模块，用于读取 users.json 用户凭证
 import os  # 导入 os 模块，用于路径拼接与目录创建
 import socket  # 导入 socket 模块，提供 TCP 网络编程能力
 import struct  # 导入 struct 模块，用于二进制报文头的打包与解包
 import threading  # 导入 threading 模块，实现多客户端并发处理
-from typing import Dict, Tuple  # 导入类型注解，提升代码可读性
+from typing import Optional, Tuple  # 导入类型注解，提升代码可读性
 
+import database  # SQLite 用户凭证与文件元数据持久化
 from http_handler import handle_http_connection  # 浏览器 HTTP 请求处理
 from prefixed_socket import PrefixedSocket  # 带前缀缓冲的 Socket 包装器
 
@@ -41,19 +41,12 @@ PORT = 8082  # 监听端口 8082
 
 # 当前脚本所在目录，用于定位 users.json 与 storage 目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取 server.py 所在绝对路径
-USERS_FILE = os.path.join(BASE_DIR, "users.json")  # 用户凭证 JSON 文件路径
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")  # 服务端文件存储目录路径
 
 
 def ensure_storage_dir() -> None:
     """若 storage 目录不存在则自动创建。"""
     os.makedirs(STORAGE_DIR, exist_ok=True)  # exist_ok=True 避免目录已存在时报错
-
-
-def load_users() -> Dict[str, str]:
-    """从 users.json 加载允许登录的用户名与密码映射表。"""
-    with open(USERS_FILE, "r", encoding="utf-8") as fp:  # 以 UTF-8 只读方式打开用户文件
-        return json.load(fp)  # 解析 JSON 并返回字典 {用户名: 密码}
 
 
 def recv_exact(conn: socket.socket, size: int) -> bytes:
@@ -104,29 +97,36 @@ def send_error(conn: socket.socket, message: str) -> None:
     send_frame(conn, CMD_ERROR, body)  # 以 ERROR 命令发送
 
 
-def handle_login(conn: socket.socket, payload: bytes, users: Dict[str, str]) -> bool:
+def handle_login(conn: socket.socket, payload: bytes) -> Tuple[bool, Optional[str]]:
     """
-    处理登录请求，返回是否验证成功。
-    payload 格式：username_len(2) + username + password_len(2) + password
+    处理登录请求，返回 (是否验证成功, 用户名或 None)。
+
+    传输安全：payload 中 password 字段为客户端预计算的 SHA-256 哈希（非明文），
+    服务端直接做零知识比对，抓包无法获得原始密码。
+
+    payload 格式：username_len(2) + username + password_hash_len(2) + password_hash
     """
     offset = 0  # payload 解析偏移量
     user_len = struct.unpack("!H", payload[offset : offset + 2])[0]  # 读取用户名长度（2 字节）
     offset += 2  # 偏移前进 2 字节
     username = payload[offset : offset + user_len].decode("utf-8")  # 截取并解码用户名
     offset += user_len  # 偏移跳过用户名字节
-    pass_len = struct.unpack("!H", payload[offset : offset + 2])[0]  # 读取密码长度
+    pass_len = struct.unpack("!H", payload[offset : offset + 2])[0]  # 读取哈希字符串长度
     offset += 2  # 偏移前进 2 字节
-    password = payload[offset : offset + pass_len].decode("utf-8")  # 截取并解码密码
+    password_hash = payload[offset : offset + pass_len].decode("utf-8")  # 客户端预哈希，非明文
 
-    if username not in users:  # 用户名不在允许列表中
-        send_login_response(conn, AUTH_USER_ERR, "用户名错误")  # 明确返回用户名错误
-        return False  # 登录失败
-    if users[username] != password:  # 用户名存在但密码不匹配
-        send_login_response(conn, AUTH_PASS_ERR, "密码错误")  # 明确返回密码错误
-        return False  # 登录失败
+    # 零知识比对：client_hash == stored_hash，服务端永不接触明文密码
+    ok, message = database.authenticate(username, password_hash)
+    if not ok:
+        # 根据错误消息映射到 FTCP 协议状态码，保持与旧版客户端兼容
+        if message == "用户名错误":
+            send_login_response(conn, AUTH_USER_ERR, message)
+        else:
+            send_login_response(conn, AUTH_PASS_ERR, message)
+        return False, None  # 登录失败，无有效用户名
 
     send_login_response(conn, AUTH_OK, "登录成功")  # 验证通过，返回成功状态
-    return True  # 登录成功
+    return True, username  # 登录成功，返回用户名供后续上传记录 uploader
 
 
 def parse_file_meta(payload: bytes) -> Tuple[str, int]:
@@ -137,28 +137,52 @@ def parse_file_meta(payload: bytes) -> Tuple[str, int]:
     return filename, file_size  # 返回元数据元组
 
 
-def handle_upload(conn: socket.socket, payload: bytes) -> None:
+def handle_upload(conn: socket.socket, payload: bytes, uploader: str) -> None:
     """
-    处理文件上传：先解析元数据，再循环 recv(4096) 写入本地文件。
+    处理文件上传：先写入 .tmp 临时文件，完整接收后再 rename 为正式文件。
+
+    断点异常处理（残缺文件清理）设计要点：
+    1. 接收过程中一律写入 storage/filename.tmp，避免半成品污染正式目录。
+    2. recv_exact 在 ConnectionResetError / ConnectionError 等断线时会抛出异常。
+    3. except 块立即 os.remove(tmp_path)，释放磁盘空间，防止残缺文件堆积。
+    4. 仅当全部字节收齐并成功发送 CMD_UPLOAD_ACK 前，才 rename + 写 SQLite。
     """
     filename, file_size = parse_file_meta(payload)  # 从报文头 payload 解析文件名与大小
     safe_name = os.path.basename(filename)  # 仅保留 basename，防止路径穿越攻击
-    save_path = os.path.join(STORAGE_DIR, safe_name)  # 拼接服务端存储完整路径
+    save_path = os.path.join(STORAGE_DIR, safe_name)  # 正式文件最终路径
+    tmp_path = save_path + ".tmp"  # 临时文件路径，上传未完成前仅写此处
 
     received = 0  # 已接收文件字节计数
-    with open(save_path, "wb") as fp:  # 以二进制写模式打开目标文件
-        while received < file_size:  # 循环直到收满 file_size 字节
-            to_read = min(CHUNK_SIZE, file_size - received)  # 末块可能不足 4096 字节
-            chunk = recv_exact(conn, to_read)  # 从 Socket 接收缓存精确读取一块数据
-            fp.write(chunk)  # 通过文件指针实时写入磁盘对应位置
-            received += len(chunk)  # 累加已接收字节数
+    try:
+        with open(tmp_path, "wb") as fp:  # 以二进制写模式打开临时文件
+            while received < file_size:  # 循环直到收满 file_size 字节
+                to_read = min(CHUNK_SIZE, file_size - received)  # 末块可能不足 4096 字节
+                chunk = recv_exact(conn, to_read)  # 断线时此处抛出 ConnectionError 等
+                fp.write(chunk)  # 实时写入临时文件
+                received += len(chunk)  # 累加已接收字节数
 
-    print(f"[上传完成] {safe_name} ({file_size} 字节)")  # 控制台记录上传日志
+        # 全部字节接收完毕：原子 rename 将 .tmp 转为正式文件（同目录下为原子操作）
+        os.rename(tmp_path, save_path)
 
-    # 上传 ACK 响应帧 payload：status(1) + file_size(8) + name_len(4) + filename
-    name_bytes = safe_name.encode("utf-8")  # 将文件名编码为 UTF-8 字节
-    ack_body = struct.pack("!BQI", 0, file_size, len(name_bytes)) + name_bytes  # 0 表示成功
-    send_frame(conn, CMD_UPLOAD_ACK, ack_body)  # 向客户端发送上传完成确认帧
+        # 写入 SQLite 文件元数据（上传者、时间、大小）
+        database.insert_file_meta(safe_name, uploader, file_size)
+
+        print(f"[上传完成] {safe_name} ({file_size} 字节) 上传者: {uploader}")
+
+        # 上传 ACK 响应帧 payload：status(1) + file_size(8) + name_len(4) + filename
+        name_bytes = safe_name.encode("utf-8")
+        ack_body = struct.pack("!BQI", 0, file_size, len(name_bytes)) + name_bytes
+        send_frame(conn, CMD_UPLOAD_ACK, ack_body)  # 向客户端发送上传完成确认帧
+
+    except (ConnectionError, ConnectionResetError, BrokenPipeError, OSError) as exc:
+        # 断线或 I/O 异常：清理 .tmp 残留，避免占用硬盘
+        if os.path.isfile(tmp_path):
+            try:
+                os.remove(tmp_path)  # 删除未完成的临时文件
+                print(f"[上传中断] 已清理残缺临时文件: {tmp_path} ({exc})")
+            except OSError as rm_err:
+                print(f"[上传中断] 清理临时文件失败: {tmp_path} -> {rm_err}")
+        raise  # 重新抛出，由 client_handler 外层统一记录断开日志
 
 
 def handle_download(conn: socket.socket, payload: bytes) -> None:
@@ -191,15 +215,12 @@ def handle_download(conn: socket.socket, payload: bytes) -> None:
 
 
 def handle_list(conn: socket.socket) -> None:
-    """扫描 storage 目录并返回文件列表。"""
-    files = []  # 存放 (文件名, 大小) 元组列表
-    for name in os.listdir(STORAGE_DIR):  # 遍历存储目录下所有条目
-        path = os.path.join(STORAGE_DIR, name)  # 拼接完整路径
-        if os.path.isfile(path):  # 仅列出普通文件
-            files.append((name, os.path.getsize(path)))  # 记录文件名与字节大小
-
-    body = struct.pack("!I", len(files))  # 前 4 字节为文件数量
-    for name, size in files:  # 逐个序列化文件条目
+    """从 SQLite files_meta 表读取文件列表并返回（不再扫描纯文件系统）。"""
+    records = database.list_files()  # 查询数据库中的文件元数据
+    body = struct.pack("!I", len(records))  # 前 4 字节为文件数量
+    for item in records:  # 逐个序列化文件条目
+        name = item["name"]
+        size = item["size"]
         name_bytes = name.encode("utf-8")  # 文件名转字节
         body += struct.pack("!IQ", len(name_bytes), size) + name_bytes  # 长度+大小+名称
 
@@ -207,16 +228,19 @@ def handle_list(conn: socket.socket) -> None:
 
 
 def handle_delete(conn: socket.socket, payload: bytes) -> None:
-    """删除 storage 目录中的指定文件。"""
+    """删除 storage 目录中的指定文件，并同步移除 SQLite 元数据记录。"""
     filename, _ = parse_file_meta(payload)  # 解析要删除的文件名
     safe_name = os.path.basename(filename)  # 安全化文件名，防止路径穿越
     file_path = os.path.join(STORAGE_DIR, safe_name)  # 服务端文件完整路径
 
-    if not os.path.isfile(file_path):  # 文件不存在
+    # 以数据库记录为准判断文件是否存在（与 list 接口保持一致）
+    if database.get_file_meta(safe_name) is None and not os.path.isfile(file_path):
         send_error(conn, f"文件不存在: {safe_name}")  # 返回错误帧
         return  # 结束删除
 
-    os.remove(file_path)  # 从磁盘删除文件
+    if os.path.isfile(file_path):
+        os.remove(file_path)  # 从磁盘删除文件
+    database.delete_file_meta(safe_name)  # 删除数据库元数据（即使磁盘已无文件也清理记录）
     print(f"[删除完成] {safe_name}")  # 控制台记录删除日志
 
     msg_bytes = f"已删除: {safe_name}".encode("utf-8")  # 成功消息 UTF-8 编码
@@ -227,14 +251,20 @@ def handle_delete(conn: socket.socket, payload: bytes) -> None:
 def client_handler(conn: socket.socket, addr: Tuple[str, int]) -> None:
     """单个 FTCP 客户端连接的处理线程入口。"""
     print(f"[FTCP连接] {addr[0]}:{addr[1]} 已接入")  # 打印客户端地址
+
+    # 死连接防范：120 秒内无任何 recv/send 活动则抛 socket.timeout，避免线程永久阻塞
+    # 理论意义：异常离线客户端若不设超时，parse_header 的 recv 将无限挂起，耗尽线程池
+    conn.settimeout(120.0)
+
     authenticated = False  # 当前连接是否已通过身份验证
+    current_user: Optional[str] = None  # 登录成功后记录用户名，供上传时写入 uploader 字段
 
     try:
         while True:  # 持续处理该客户端的多条命令
             cmd, payload = parse_header(conn)  # 解析一帧完整报文
 
             if cmd == CMD_LOGIN:  # 登录命令
-                authenticated = handle_login(conn, payload, load_users())  # 执行验证并更新状态
+                authenticated, current_user = handle_login(conn, payload)  # 哈希验证并更新状态
                 continue  # 继续等待下一条命令
 
             if not authenticated:  # 未登录则拒绝文件类操作
@@ -242,9 +272,9 @@ def client_handler(conn: socket.socket, addr: Tuple[str, int]) -> None:
                 continue  # 不断开连接，允许用户重新登录
 
             if cmd == CMD_LIST:  # 列表命令
-                handle_list(conn)  # 返回 storage 目录文件列表
+                handle_list(conn)  # 从 SQLite 返回文件列表
             elif cmd == CMD_UPLOAD:  # 上传命令
-                handle_upload(conn, payload)  # 接收文件流并落盘
+                handle_upload(conn, payload, current_user or "unknown")  # .tmp 安全上传
             elif cmd == CMD_DOWNLOAD:  # 下载命令
                 handle_download(conn, payload)  # 发送文件流给客户端
             elif cmd == CMD_DELETE:  # 删除命令
@@ -252,12 +282,17 @@ def client_handler(conn: socket.socket, addr: Tuple[str, int]) -> None:
             else:  # 未知命令字
                 send_error(conn, f"未知命令: {cmd}")  # 返回错误提示
 
+    except socket.timeout:  # 120s 无活动：主动释放线程与 Socket，防止资源枯竭
+        print(f"[超时] {addr[0]}:{addr[1]} 120s 无活动，主动断开")
     except (ConnectionError, ConnectionResetError, BrokenPipeError):  # 客户端正常或异常断开
         print(f"[断开] {addr[0]}:{addr[1]} 连接关闭")  # 记录断开日志
     except Exception as exc:  # 捕获其他未预期异常
         print(f"[异常] {addr[0]}:{addr[1]} -> {exc}")  # 打印异常信息
     finally:
-        conn.close()  # 无论何种情况都关闭 Socket 释放资源
+        try:
+            conn.close()  # 无论何种情况都关闭 Socket 释放资源
+        except OSError:
+            pass  # 忽略重复关闭时的异常
 
 
 def _is_http_peek(peek: bytes) -> bool:
@@ -309,7 +344,15 @@ def dispatch_connection(client_conn: socket.socket, client_addr: Tuple[str, int]
 def main() -> None:
     """服务器主函数：创建监听 Socket 并派生工作线程。"""
     ensure_storage_dir()  # 确保 storage 目录存在
-    load_users()  # 启动时预加载用户表，校验 users.json 可读
+    database.init_db()  # 初始化 SQLite 表结构
+    synced = database.sync_storage_files(STORAGE_DIR)  # 将已有 storage 文件补录入库
+    if synced:
+        print(f"[数据库] 已从 storage 同步 {synced} 个历史文件到 files_meta 表")
+    user_count = len(database.get_all_users())
+    if user_count == 0:
+        print("[警告] 数据库中无用户，请先运行: python3 migrate_users.py")
+    else:
+        print(f"[数据库] 已加载 {user_count} 个用户（密码为 SHA-256 哈希存储）")
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # 创建 TCP Socket
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # 允许端口快速重用

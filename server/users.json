@@ -1,4 +1,7 @@
 {
-  "admin": "admin123",
-  "student": "tcp2026"
+  "_notice": "用户凭证已迁移至 ftcp.db（SQLite），请使用 migrate_users.py 管理。",
+  "_users_in_db": [
+    "admin",
+    "student"
+  ]
 }

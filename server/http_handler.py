@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""HTTP Web 界面：浏览器访问 8082 端口，与 FTCP 共用 storage 与 users.json。"""
+"""HTTP Web 界面：浏览器访问 8082 端口，与 FTCP 共用 storage 与 SQLite 数据库。"""
 
 import json  # JSON 编解码
 import os  # 路径与文件操作
@@ -9,6 +9,8 @@ import threading  # Session 字典线程锁
 import urllib.parse  # URL 解码文件名等参数
 from http.server import BaseHTTPRequestHandler  # HTTP 请求处理基类
 from typing import Dict, Optional, Tuple  # 类型注解
+
+import database  # SQLite 用户与文件元数据（与 FTCP 共用）
 
 CHUNK_SIZE = 4096  # 与 TCP 服务一致的分块大小
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # server 目录
@@ -19,21 +21,12 @@ _sessions: Dict[str, str] = {}  # session_token -> username 映射表
 _session_lock = threading.Lock()  # 保护 _sessions 的并发访问锁
 
 
-def _load_users() -> Dict[str, str]:
-    """读取 users.json 用户凭证。"""
-    users_file = os.path.join(BASE_DIR, "users.json")  # 用户文件路径
-    with open(users_file, "r", encoding="utf-8") as fp:  # UTF-8 打开
-        return json.load(fp)  # 返回用户名密码字典
-
-
-def _verify_login(username: str, password: str) -> Tuple[bool, str]:
-    """验证登录，返回 (是否成功, 错误信息)。"""
-    users = _load_users()  # 加载用户表
-    if username not in users:  # 用户名不存在
-        return False, "用户名错误"  # 细分错误类型
-    if users[username] != password:  # 密码不匹配
-        return False, "密码错误"  # 细分错误类型
-    return True, "登录成功"  # 验证通过
+def _verify_login(username: str, password_hash: str) -> Tuple[bool, str]:
+    """
+    验证登录：password_hash 为客户端预计算的 SHA-256 摘要（非明文）。
+    委托 database.authenticate 做零知识字符串比对。
+    """
+    return database.authenticate(username, password_hash)
 
 
 def _create_session(username: str) -> str:
@@ -57,16 +50,13 @@ def _get_session_user(cookie_header: str) -> Optional[str]:
     return None  # 未找到有效 Session
 
 
-def _list_storage_files(storage_dir: str):
-    """列出 storage 目录中的文件及大小。"""
-    items = []  # 结果列表
-    for name in os.listdir(storage_dir):  # 遍历目录
-        if name.startswith(".") or name == ".gitkeep":  # 跳过隐藏文件与占位文件
-            continue  # 不展示在 Web 列表
-        path = os.path.join(storage_dir, name)  # 完整路径
-        if os.path.isfile(path):  # 仅普通文件
-            items.append({"name": name, "size": os.path.getsize(path)})  # 追加元数据
-    return items  # 返回文件列表
+def _list_storage_files():
+    """
+    从 SQLite files_meta 表读取文件列表（与 FTCP handle_list 数据源一致）。
+    Web 端仅展示 name 与 size，uploader/upload_time 可按需扩展至前端。
+    """
+    records = database.list_files()
+    return [{"name": r["name"], "size": r["size"]} for r in records]
 
 
 def _normalize_path(raw_path: str) -> str:
@@ -77,14 +67,22 @@ def _normalize_path(raw_path: str) -> str:
 
 
 def _delete_storage_file(storage_dir: str, name: str) -> Tuple[bool, str, Optional[str]]:
-    """删除 storage 中文件，返回 (成功, 消息, 文件名)。"""
+    """
+    删除 storage 中文件并同步移除 SQLite 元数据。
+    先查数据库再删磁盘，保证 list 与 delete 语义一致。
+    """
     safe_name = os.path.basename(str(name).strip())  # 安全化文件名
     if not safe_name:  # 文件名为空
         return False, "文件名不能为空", None  # 参数错误
-    file_path = os.path.join(storage_dir, safe_name)  # 完整路径
-    if not os.path.isfile(file_path):  # 文件不存在
-        return False, "文件不存在", safe_name  # 未找到
-    os.remove(file_path)  # 删除文件
+
+    meta = database.get_file_meta(safe_name)
+    file_path = os.path.join(storage_dir, safe_name)
+    if meta is None and not os.path.isfile(file_path):
+        return False, "文件不存在", safe_name  # 库与磁盘均无此文件
+
+    if os.path.isfile(file_path):
+        os.remove(file_path)  # 删除磁盘文件
+    database.delete_file_meta(safe_name)  # 删除数据库记录
     print(f"[HTTP删除] {safe_name}")  # 控制台日志
     return True, "删除成功", safe_name  # 删除成功
 
@@ -164,7 +162,7 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/files":  # 获取远端文件列表 API
             if not self._require_user():  # 需要登录
                 return  # 未登录已返回 401
-            files = _list_storage_files(self.storage_dir)  # 扫描 storage
+            files = _list_storage_files()  # 从 SQLite 查询文件列表
             self._send_json(200, {"ok": True, "files": files})  # 返回 JSON 列表
             return  # 结束
 
@@ -175,7 +173,8 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
             name = query.get("name", [""])[0]  # 取 name 参数
             safe_name = os.path.basename(name)  # 安全化文件名
             file_path = os.path.join(self.storage_dir, safe_name)  # 本地路径
-            if not os.path.isfile(file_path):  # 文件不存在
+            # 下载前校验：数据库有记录且磁盘文件存在
+            if database.get_file_meta(safe_name) is None or not os.path.isfile(file_path):
                 self._send_json(404, {"ok": False, "message": "文件不存在"})  # 404
                 return  # 结束
             size = os.path.getsize(file_path)  # 文件大小
@@ -212,8 +211,8 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "message": "请求格式错误"})  # 400
                 return  # 结束
             username = str(data.get("username", "")).strip()  # 取用户名
-            password = str(data.get("password", ""))  # 取密码
-            ok, message = _verify_login(username, password)  # 验证凭证
+            password_hash = str(data.get("password", ""))  # 客户端预哈希，非明文
+            ok, message = _verify_login(username, password_hash)  # 零知识比对
             if not ok:  # 登录失败
                 self._send_json(401, {"ok": False, "message": message})  # 返回具体错误
                 return  # 结束
@@ -231,6 +230,7 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/upload":  # 上传 API
             if not self._require_user():  # 必须登录
                 return  # 未登录
+            uploader = _get_session_user(self.headers.get("Cookie", "")) or "unknown"
             content_type = self.headers.get("Content-Type", "")  # 获取 Content-Type
             if "multipart/form-data" not in content_type:  # 必须是 multipart 表单
                 self._send_json(400, {"ok": False, "message": "请使用 multipart 上传"})  # 400
@@ -241,10 +241,25 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "message": "未找到上传文件"})  # 400
                 return  # 结束
             safe_name = os.path.basename(filename)  # 安全文件名
-            save_path = os.path.join(self.storage_dir, safe_name)  # 保存路径
-            with open(save_path, "wb") as fp:  # 二进制写入
-                fp.write(file_data)  # 一次性写入文件内容
-            print(f"[HTTP上传] {safe_name} ({len(file_data)} 字节)")  # 日志
+            save_path = os.path.join(self.storage_dir, safe_name)  # 正式文件路径
+            tmp_path = save_path + ".tmp"  # HTTP 上传同样先写临时文件，成功后 rename
+
+            try:
+                with open(tmp_path, "wb") as fp:  # 写入临时文件
+                    fp.write(file_data)
+                os.rename(tmp_path, save_path)  # 完整写入后原子重命名
+                database.insert_file_meta(safe_name, uploader, len(file_data))  # 写入 SQLite
+            except OSError as exc:
+                # 写入失败时清理 .tmp，与 FTCP 断线清理策略一致
+                if os.path.isfile(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                self._send_json(500, {"ok": False, "message": f"保存文件失败: {exc}"})
+                return
+
+            print(f"[HTTP上传] {safe_name} ({len(file_data)} 字节) 上传者: {uploader}")  # 日志
             self._send_json(200, {"ok": True, "message": "上传完成", "name": safe_name, "size": len(file_data)})  # ACK
             return  # 结束
 
