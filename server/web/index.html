@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TCP 文件传输 · Web 控制台</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #3b82f6;
+      --accent2: #22c55e;
+      --danger: #ef4444;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(ellipse at top, #1e293b 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+    }
+    header h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: 0.02em; }
+    header p { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+    .badge {
+      background: rgba(59,130,246,.15); color: #93c5fd;
+      border: 1px solid rgba(59,130,246,.35);
+      padding: 6px 12px; border-radius: 999px; font-size: 0.85rem;
+    }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 18px; box-shadow: 0 8px 32px rgba(0,0,0,.25);
+    }
+    .card h2 { font-size: 1rem; margin-bottom: 14px; color: #cbd5e1; }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
+    input[type=text], input[type=password], input[type=file] {
+      width: 100%; padding: 10px 12px; border-radius: 8px;
+      border: 1px solid var(--border); background: #0b1220; color: var(--text);
+      margin-bottom: 10px;
+    }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    button {
+      border: none; border-radius: 8px; padding: 10px 16px;
+      font-weight: 600; cursor: pointer; transition: opacity .15s;
+    }
+    button:hover { opacity: .88; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-success { background: var(--accent2); color: #fff; }
+    .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .status { margin-top: 10px; font-size: 0.9rem; }
+    .status.ok { color: #4ade80; }
+    .status.err { color: #f87171; }
+    .status.warn { color: var(--warn); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; }
+    tr:hover { background: rgba(255,255,255,.03); cursor: pointer; }
+    tr.selected { background: rgba(59,130,246,.12); }
+    .progress-wrap { margin-top: 12px; }
+    .progress-bar {
+      height: 10px; background: #0b1220; border-radius: 999px; overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .progress-bar > div {
+      height: 100%; width: 0%; background: linear-gradient(90deg, #3b82f6, #22c55e);
+      transition: width .2s;
+    }
+    .progress-text { font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
+    #log {
+      background: #0b1220; border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px; height: 180px; overflow-y: auto; font-family: Consolas, monospace;
+      font-size: 0.82rem; line-height: 1.5; color: #94a3b8;
+    }
+    .full { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>TCP 文件传输系统</h1>
+        <p>Web 控制台 · 与 Python 客户端共用 8082 端口 storage 目录</p>
+      </div>
+      <span class="badge" id="serverBadge">服务器在线</span>
+    </header>
+
+    <div class="grid">
+      <section class="card">
+        <h2>用户登录</h2>
+        <label>用户名</label>
+        <input type="text" id="username" placeholder="admin" />
+        <label>密码</label>
+        <input type="password" id="password" placeholder="admin123" />
+        <div class="row">
+          <button class="btn-primary" onclick="doLogin()">登录验证</button>
+          <button class="btn-ghost" onclick="doLogout()">退出</button>
+        </div>
+        <div class="status warn" id="authStatus">状态：未登录</div>
+      </section>
+
+      <section class="card">
+        <h2>上传文件</h2>
+        <label>选择本地文件（txt / 图片 / 视频等）</label>
+        <input type="file" id="fileInput" />
+        <div class="row">
+          <button class="btn-success" onclick="doUpload()">上传到服务器</button>
+          <button class="btn-ghost" onclick="loadFiles()">刷新列表</button>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress-bar"><div id="progressFill"></div></div>
+          <div class="progress-text" id="progressText">传输进度：0%</div>
+        </div>
+      </section>
+
+      <section class="card full">
+        <h2>服务器文件列表</h2>
+        <table>
+          <thead><tr><th>文件名</th><th>大小</th><th>操作</th></tr></thead>
+          <tbody id="fileTable"><tr><td colspan="3" style="color:var(--muted)">请先登录后刷新列表</td></tr></tbody>
+        </table>
+      </section>
+
+      <section class="card full">
+        <h2>运行日志</h2>
+        <div id="log"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    let loggedIn = false;
+    let selectedFile = "";
+
+    function log(msg) {
+      const el = document.getElementById("log");
+      const t = new Date().toLocaleTimeString();
+      el.textContent += `[${t}] ${msg}\n`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function setProgress(p, text) {
+      document.getElementById("progressFill").style.width = `${Math.min(100, p)}%`;
+      document.getElementById("progressText").textContent = text || `传输进度：${p.toFixed(1)}%`;
+    }
+
+    function setAuth(ok, msg) {
+      loggedIn = ok;
+      const el = document.getElementById("authStatus");
+      el.textContent = ok ? "状态：已登录" : `状态：${msg || "未登录"}`;
+      el.className = "status " + (ok ? "ok" : "err");
+    }
+
+    async function doLogin() {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      if (!username || !password) { alert("请输入用户名和密码"); return; }
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+          credentials: "same-origin",
+        });
+        const data = await res.json();
+        if (!data.ok) { alert(data.message); setAuth(false, data.message); log("登录失败：" + data.message); return; }
+        setAuth(true, data.message);
+        log("登录成功：" + username);
+        loadFiles();
+      } catch (e) { alert("连接失败，请确认服务器已启动"); log("连接错误：" + e); }
+    }
+
+    async function doLogout() {
+      await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
+      setAuth(false, "未登录");
+      log("已退出登录");
+      document.getElementById("fileTable").innerHTML = '<tr><td colspan="3" style="color:var(--muted)">请先登录</td></tr>';
+    }
+
+    async function loadFiles() {
+      if (!loggedIn) { alert("请先登录"); return; }
+      try {
+        const res = await fetch("/api/files", { credentials: "same-origin" });
+        const data = await res.json();
+        if (!data.ok) { alert(data.message); return; }
+        const tbody = document.getElementById("fileTable");
+        if (!data.files.length) {
+          tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">暂无文件</td></tr>';
+          return;
+        }
+        tbody.innerHTML = data.files.map(f => {
+          const kb = (f.size / 1024).toFixed(1);
+          return `<tr onclick="selectRow(this,'${f.name.replace(/'/g, "\\'")}')">
+            <td>${f.name}</td><td>${kb} KB</td>
+            <td><button class="btn-primary" onclick="event.stopPropagation();downloadFile('${f.name.replace(/'/g, "\\'")}')">下载</button></td>
+          </tr>`;
+        }).join("");
+        log(`已加载 ${data.files.length} 个远端文件`);
+      } catch (e) { alert("获取列表失败"); log("列表错误：" + e); }
+    }
+
+    function selectRow(row, name) {
+      document.querySelectorAll("#fileTable tr").forEach(r => r.classList.remove("selected"));
+      row.classList.add("selected");
+      selectedFile = name;
+    }
+
+    function downloadFile(name) {
+      if (!loggedIn) { alert("请先登录"); return; }
+      const n = name || selectedFile;
+      if (!n) { alert("请选择要下载的文件"); return; }
+      window.location.href = "/api/download?name=" + encodeURIComponent(n);
+      log("开始下载：" + n);
+    }
+
+    function doUpload() {
+      if (!loggedIn) { alert("请先登录后再上传"); return; }
+      const input = document.getElementById("fileInput");
+      if (!input.files.length) { alert("请选择文件"); return; }
+      const file = input.files[0];
+      const form = new FormData();
+      form.append("file", file);
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/upload");
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const p = (e.loaded / e.total) * 100;
+          setProgress(p, `上传中：${file.name} (${p.toFixed(1)}%)`);
+        }
+      };
+      xhr.onload = () => {
+        try {
+          const data = JSON.parse(xhr.responseText);
+          if (!data.ok) { alert(data.message); log("上传失败：" + data.message); return; }
+          setProgress(100, "上传完成");
+          log(`上传成功：${data.name} (${data.size} 字节)`);
+          loadFiles();
+        } catch (e) { alert("上传响应异常"); }
+      };
+      xhr.onerror = () => { alert("上传失败"); log("上传网络错误"); };
+      xhr.send(form);
+    }
+
+    log("Web 控制台已加载，请先登录。");
+  </script>
+</body>
+</html>

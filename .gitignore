@@ -1,0 +1,27 @@
+# Python 字节码与缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE 与系统文件
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 运行时产生的传输文件（保留目录结构）
+server/storage/*
+!server/storage/.gitkeep
+client/downloads/*
+!client/downloads/.gitkeep
+
+# 测试与临时文件
+*.log
+_test_run.py
+test_integration.py
