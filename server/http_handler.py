@@ -69,6 +69,29 @@ def _list_storage_files(storage_dir: str):
     return items  # 返回文件列表
 
 
+def _normalize_path(raw_path: str) -> str:
+    """规范化请求路径，去除 query 与末尾斜杠。"""
+    path = urllib.parse.urlparse(raw_path).path  # 仅保留路径部分
+    path = path.rstrip("/")  # 去掉末尾 /
+    return path or "/"  # 根路径兜底
+
+
+def _delete_storage_file(storage_dir: str, name: str) -> Tuple[bool, str, Optional[str]]:
+    """删除 storage 中文件，返回 (成功, 消息, 文件名)。"""
+    safe_name = os.path.basename(str(name).strip())  # 安全化文件名
+    if not safe_name:  # 文件名为空
+        return False, "文件名不能为空", None  # 参数错误
+    file_path = os.path.join(storage_dir, safe_name)  # 完整路径
+    if not os.path.isfile(file_path):  # 文件不存在
+        return False, "文件不存在", safe_name  # 未找到
+    os.remove(file_path)  # 删除文件
+    print(f"[HTTP删除] {safe_name}")  # 控制台日志
+    return True, "删除成功", safe_name  # 删除成功
+
+
+API_VERSION = "1.1.0"  # API 版本（含删除接口）
+
+
 def _read_index_html() -> bytes:
     """读取主页 HTML 内容。"""
     with open(INDEX_FILE, "rb") as fp:  # 二进制读取 HTML
@@ -109,14 +132,34 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
             return None  # 终止后续处理
         return user  # 返回已登录用户名
 
+    def _read_body(self) -> bytes:
+        """读取 POST/DELETE 请求体。"""
+        length = int(self.headers.get("Content-Length", "0") or "0")  # 内容长度
+        return self.rfile.read(length) if length > 0 else b""  # 读取字节
+
+    def _handle_delete_api(self, name: str) -> None:
+        """统一处理删除文件 API。"""
+        if not self._require_user():  # 必须登录
+            return  # 未登录
+        ok, message, safe_name = _delete_storage_file(self.storage_dir, name)  # 执行删除
+        if not ok:  # 删除失败
+            code = 404 if message == "文件不存在" else 400  # 选择 HTTP 状态码
+            self._send_json(code, {"ok": False, "message": message})  # 返回错误
+            return  # 结束
+        self._send_json(200, {"ok": True, "message": message, "name": safe_name})  # 返回成功
+
     def do_GET(self) -> None:
-        """处理 GET 请求：主页、文件列表、文件下载。"""
-        parsed = urllib.parse.urlparse(self.path)  # 解析 URL 路径与查询串
-        path = parsed.path  # 提取路径部分
+        """处理 GET 请求：主页、文件列表、文件下载、版本检查。"""
+        parsed = urllib.parse.urlparse(self.path)  # 解析 URL
+        path = _normalize_path(parsed.path)  # 规范化路径
 
         if path in ("/", "/index.html"):  # 访问首页
             self._send_html(200, _read_index_html())  # 返回 Web 界面
             return  # 结束处理
+
+        if path == "/api/version":  # API 版本（用于确认服务端已更新）
+            self._send_json(200, {"ok": True, "version": API_VERSION, "features": ["login", "upload", "download", "delete", "list"]})
+            return  # 结束
 
         if path == "/api/files":  # 获取远端文件列表 API
             if not self._require_user():  # 需要登录
@@ -158,11 +201,9 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "message": "接口不存在"})  # 未知路径
 
     def do_POST(self) -> None:
-        """处理 POST 请求：登录、上传。"""
-        parsed = urllib.parse.urlparse(self.path)  # 解析 URL
-        path = parsed.path  # 路径
-        length = int(self.headers.get("Content-Length", "0") or "0")  # 请求体长度
-        body = self.rfile.read(length) if length > 0 else b""  # 读取完整请求体
+        """处理 POST 请求：登录、上传、删除、退出。"""
+        path = _normalize_path(self.path)  # 规范化路径
+        body = self._read_body()  # 读取请求体
 
         if path == "/api/login":  # 登录 API
             try:
@@ -207,6 +248,15 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "message": "上传完成", "name": safe_name, "size": len(file_data)})  # ACK
             return  # 结束
 
+        if path == "/api/delete":  # 删除文件 API（POST JSON）
+            try:
+                data = json.loads(body.decode("utf-8") or "{}")  # 解析 JSON
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "message": "请求格式错误"})
+                return
+            self._handle_delete_api(str(data.get("name", "")))  # 调用统一删除逻辑
+            return  # 结束
+
         if path == "/api/logout":  # 退出登录
             cookie = self.headers.get("Cookie", "")  # 读取 Cookie
             for part in cookie.split(";"):  # 遍历 Cookie
@@ -224,7 +274,25 @@ class WebHTTPHandler(BaseHTTPRequestHandler):
             self.wfile.write(resp)  # 发送
             return  # 结束
 
-        self._send_json(404, {"ok": False, "message": "接口不存在"})  # 未知 POST 路径
+        self._send_json(404, {"ok": False, "message": "接口不存在", "path": path})  # 未知 POST 路径
+
+    def do_DELETE(self) -> None:
+        """处理 DELETE 请求：/api/delete?name=xxx（兼容部分客户端/代理）。"""
+        parsed = urllib.parse.urlparse(self.path)  # 解析 URL
+        path = _normalize_path(parsed.path)  # 规范化路径
+        if path != "/api/delete":  # 非删除路径
+            self._send_json(404, {"ok": False, "message": "接口不存在", "path": path})
+            return  # 结束
+        query = urllib.parse.parse_qs(parsed.query)  # 解析查询参数
+        name = query.get("name", [""])[0]  # 取文件名
+        if not name:  # 尝试从 body 读取
+            try:
+                body = self._read_body()
+                data = json.loads(body.decode("utf-8") or "{}")
+                name = str(data.get("name", ""))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                name = ""
+        self._handle_delete_api(name)  # 统一删除逻辑
 
 
 def _parse_multipart(body: bytes, boundary: bytes) -> Tuple[str, Optional[bytes]]:

@@ -27,6 +27,8 @@ CMD_UPLOAD = 0x05  # 客户端发起文件上传
 CMD_DOWNLOAD = 0x06  # 客户端发起文件下载
 CMD_ERROR = 0x07  # 服务器返回通用错误信息
 CMD_UPLOAD_ACK = 0x08  # 服务器确认上传完成
+CMD_DELETE = 0x09  # 客户端请求删除远端文件
+CMD_DELETE_RESP = 0x0A  # 服务器返回删除结果
 
 # 登录结果状态码：必须细分用户名错误与密码错误
 AUTH_OK = 0  # 验证成功
@@ -204,6 +206,24 @@ def handle_list(conn: socket.socket) -> None:
     send_frame(conn, CMD_LIST_RESP, body)  # 发送 LIST_RESP 帧
 
 
+def handle_delete(conn: socket.socket, payload: bytes) -> None:
+    """删除 storage 目录中的指定文件。"""
+    filename, _ = parse_file_meta(payload)  # 解析要删除的文件名
+    safe_name = os.path.basename(filename)  # 安全化文件名，防止路径穿越
+    file_path = os.path.join(STORAGE_DIR, safe_name)  # 服务端文件完整路径
+
+    if not os.path.isfile(file_path):  # 文件不存在
+        send_error(conn, f"文件不存在: {safe_name}")  # 返回错误帧
+        return  # 结束删除
+
+    os.remove(file_path)  # 从磁盘删除文件
+    print(f"[删除完成] {safe_name}")  # 控制台记录删除日志
+
+    msg_bytes = f"已删除: {safe_name}".encode("utf-8")  # 成功消息 UTF-8 编码
+    body = struct.pack("!BH", 0, len(msg_bytes)) + msg_bytes  # status(0)+消息长度+消息
+    send_frame(conn, CMD_DELETE_RESP, body)  # 发送 DELETE_RESP 确认帧
+
+
 def client_handler(conn: socket.socket, addr: Tuple[str, int]) -> None:
     """单个 FTCP 客户端连接的处理线程入口。"""
     print(f"[FTCP连接] {addr[0]}:{addr[1]} 已接入")  # 打印客户端地址
@@ -227,6 +247,8 @@ def client_handler(conn: socket.socket, addr: Tuple[str, int]) -> None:
                 handle_upload(conn, payload)  # 接收文件流并落盘
             elif cmd == CMD_DOWNLOAD:  # 下载命令
                 handle_download(conn, payload)  # 发送文件流给客户端
+            elif cmd == CMD_DELETE:  # 删除命令
+                handle_delete(conn, payload)  # 删除 storage 中的文件
             else:  # 未知命令字
                 send_error(conn, f"未知命令: {cmd}")  # 返回错误提示
 

@@ -22,6 +22,8 @@ CMD_UPLOAD = 0x05  # 上传
 CMD_DOWNLOAD = 0x06  # 下载
 CMD_ERROR = 0x07  # 错误
 CMD_UPLOAD_ACK = 0x08  # 上传完成确认
+CMD_DELETE = 0x09  # 删除
+CMD_DELETE_RESP = 0x0A  # 删除响应
 
 AUTH_OK = 0  # 登录成功
 AUTH_USER_ERR = 1  # 用户名错误
@@ -294,6 +296,36 @@ class TcpFileClient:
         self._on_progress(100.0, f"下载完成: {filename}")  # 进度 100%
         self._log(f"下载成功: {filename} -> {save_path}")  # 写日志
         self._on_transfer_done(f"下载完成: {save_path}")  # 通知 UI
+
+    def delete_file(self, remote_name: str) -> None:
+        """请求服务器删除远端文件。"""
+        if not self._logged_in:  # 必须先登录
+            raise PermissionError("请先登录后再删除")  # 权限检查
+
+        name_b = remote_name.encode("utf-8")  # 文件名 UTF-8 编码
+        meta = struct.pack("!IQ", len(name_b), 0) + name_b  # 请求元数据（size 填 0）
+        sock = self._require_socket()  # 获取 Socket
+
+        with self._lock:  # 加锁发送删除请求
+            send_frame(sock, CMD_DELETE, meta)  # 发送 DELETE 命令帧
+            cmd, body = parse_header(sock)  # 等待 DELETE_RESP 或 ERROR
+
+        if cmd == CMD_ERROR:  # 删除失败
+            msg_len = struct.unpack("!I", body[0:4])[0]  # 错误消息长度
+            err = body[4 : 4 + msg_len].decode("utf-8")  # 解码错误文本
+            raise RuntimeError(err)  # 抛给 UI 处理
+
+        if cmd != CMD_DELETE_RESP:  # 响应类型错误
+            raise ValueError("删除响应格式错误")  # 格式异常
+
+        status = body[0]  # 第 1 字节为状态码，0 表示成功
+        msg_len = struct.unpack("!H", body[1:3])[0]  # 2 字节消息长度
+        message = body[3 : 3 + msg_len].decode("utf-8")  # 解码消息
+        if status != 0:  # 非 0 表示失败
+            raise RuntimeError(message or "删除失败")  # 抛出异常
+
+        self._log(message)  # 写日志
+        self._on_transfer_done(message)  # 通知 UI 刷新列表
 
     def run_in_thread(self, target: Callable[[], None], task_name: str = "任务") -> None:
         """

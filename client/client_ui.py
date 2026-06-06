@@ -20,8 +20,8 @@ class FileTransferApp(ctk.CTk):
         """初始化界面布局与 TCP 客户端回调绑定。"""
         super().__init__()  # 调用 CTk 父类构造函数
 
-        ctk.set_appearance_mode("system")  # 跟随系统深色/浅色主题
-        ctk.set_default_color_theme("blue")  # 默认蓝色科技风配色
+        ctk.set_appearance_mode("light")  # 默认清新浅色，非深色科技风
+        ctk.set_default_color_theme("green")  # 默认绿色强调色，更自然
 
         self.title("TCP 文件传输客户端")  # 窗口标题
         self.geometry("980x720")  # 初始窗口大小
@@ -78,11 +78,22 @@ class FileTransferApp(ctk.CTk):
         )  # 断开按钮（红色系）
         self.btn_disconnect.grid(row=0, column=5, padx=(0, 12), pady=12)  # 放置断开按钮
 
-        theme_menu = ctk.CTkOptionMenu(
-            conn_frame, values=["system", "dark", "light"], command=self._on_theme_change, width=100
-        )  # 主题切换下拉
-        theme_menu.grid(row=0, column=6, padx=(0, 12), pady=12)  # 放置主题菜单
-        theme_menu.set("system")  # 默认跟随系统
+        # 界面风格预设（外观模式 + 强调色）
+        self._ui_styles = {
+            "清新浅色-绿（默认）": ("light", "green"),
+            "清新浅色-蓝": ("light", "blue"),
+            "暖色深色-蓝": ("dark", "dark-blue"),
+            "深色-绿": ("dark", "green"),
+            "跟随系统-蓝": ("system", "blue"),
+        }
+        style_menu = ctk.CTkOptionMenu(
+            conn_frame,
+            values=list(self._ui_styles.keys()),
+            command=self._on_ui_style_change,
+            width=160,
+        )  # 界面风格下拉菜单
+        style_menu.grid(row=0, column=6, padx=(0, 12), pady=12)  # 放置风格菜单
+        style_menu.set("清新浅色-绿（默认）")  # 默认风格
 
         # ---------- 登录面板 ----------
         login_frame = ctk.CTkFrame(self, corner_radius=12)  # 登录区容器
@@ -124,12 +135,12 @@ class FileTransferApp(ctk.CTk):
         self.list_remote = tk.Listbox(
             file_frame,
             height=10,
-            bg="#2B2B2B" if ctk.get_appearance_mode() == "Dark" else "#F0F0F0",
-            fg="#FFFFFF" if ctk.get_appearance_mode() == "Dark" else "#1A1A1A",
-            selectbackground="#1F6AA5",
+            bg="#F0F0F0",
+            fg="#1A1A1A",
+            selectbackground="#2FA572",
             borderwidth=0,
             highlightthickness=1,
-        )  # 远端文件 Listbox（支持双击选择）
+        )  # 远端文件 Listbox（浅色默认配色）
         self.list_remote.grid(row=1, column=0, padx=12, pady=8, sticky="nsew")  # 放置列表
         self.list_remote.bind("<<ListboxSelect>>", self._on_remote_select)  # 选中事件
 
@@ -162,6 +173,11 @@ class FileTransferApp(ctk.CTk):
         )  # 下载按钮
         self.btn_download.grid(row=0, column=2, padx=4, pady=4)  # 放置
 
+        self.btn_delete = ctk.CTkButton(
+            btn_row, text="删除文件", command=self._on_delete, width=120, fg_color="#B91C1C", hover_color="#991B1B"
+        )  # 删除远端文件按钮
+        self.btn_delete.grid(row=0, column=3, padx=4, pady=4)  # 放置
+
         # ---------- 进度条 ----------
         progress_frame = ctk.CTkFrame(self, corner_radius=12)  # 进度区
         progress_frame.grid(row=3, column=0, padx=16, pady=8, sticky="ew")  # 第四行
@@ -191,8 +207,23 @@ class FileTransferApp(ctk.CTk):
 
         self._append_log("客户端已启动，请先连接服务器并登录。")  # 初始日志
 
+    def _on_ui_style_change(self, style_name: str) -> None:
+        """切换界面风格预设（浅色/深色 + 强调色）。"""
+        appearance, color = self._ui_styles.get(style_name, ("light", "green"))  # 查预设
+        ctk.set_appearance_mode(appearance)  # 切换浅/深/系统外观
+        ctk.set_default_color_theme(color)  # 切换蓝/绿/深蓝强调色
+        dark = appearance == "dark" or (
+            appearance == "system" and ctk.get_appearance_mode() == "Dark"
+        )  # 判断是否深色
+        self.list_remote.configure(
+            bg="#2B2B2B" if dark else "#F0F0F0",
+            fg="#FFFFFF" if dark else "#1A1A1A",
+            selectbackground="#2FA572" if color == "green" else "#1F6AA5",
+        )  # 同步 Listbox 与风格一致
+        self._append_log(f"已切换界面风格：{style_name}")  # 记录风格变更
+
     def _on_theme_change(self, mode: str) -> None:
-        """切换深色/浅色/跟随系统主题。"""
+        """兼容旧接口：切换深色/浅色/跟随系统主题。"""
         ctk.set_appearance_mode(mode)  # 应用主题
         dark = mode == "dark" or (mode == "system" and ctk.get_appearance_mode() == "Dark")  # 判断是否深色
         self.list_remote.configure(
@@ -352,6 +383,19 @@ class FileTransferApp(ctk.CTk):
         name = self._selected_remote  # 捕获文件名
         self.progress_bar.set(0)  # 重置进度条
         self.client.run_in_thread(lambda: self.client.download_file(name), "下载")  # 子线程下载
+
+    def _on_delete(self) -> None:
+        """删除：强制登录校验后在子线程请求服务器删除远端文件。"""
+        if not self.client.is_logged_in:  # 未登录禁止删除
+            messagebox.showwarning("需要登录", "请先登录后再删除文件")  # 弹窗
+            return  # 终止
+        if not self._selected_remote:  # 未选远端文件
+            messagebox.showwarning("提示", "请先在远端列表中选择要删除的文件")  # 警告
+            return  # 终止
+        name = self._selected_remote  # 捕获文件名
+        if not messagebox.askyesno("确认删除", f"确定要删除服务器上的文件吗？\n\n{name}"):  # 二次确认
+            return  # 用户取消
+        self.client.run_in_thread(lambda: self.client.delete_file(name), "删除")  # 子线程删除
 
 
 def main() -> None:
